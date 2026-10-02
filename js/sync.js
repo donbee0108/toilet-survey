@@ -14,7 +14,19 @@ const emit = () => listeners.forEach((fn) => { try { fn(); } catch { /* 무시 *
 export const SENDABLE = ['queued', 'sending', 'photos', 'failed'];
 
 async function sendDraft(d) {
-  if (!d.serverId) {
+  if (d.mode === 'supplement') {
+    // 보완: 화장실번호·공간번호를 이미 알고 있으므로 빈칸 채우기만 보내고 사진으로 넘어간다
+    if (!d.supplementDone) {
+      d.status = 'sending'; d.error = '';
+      await drafts.put(d); emit();
+      const res = await call('supplement', d.submission);
+      d.result = { filled: res.filled, skipped: res.skipped || [] };
+      d.warnings = res.warnings || [];
+      d.supplementDone = true;
+      d.status = 'photos';
+      await drafts.put(d); emit();
+    }
+  } else if (!d.serverId) {
     d.status = 'sending'; d.error = '';
     await drafts.put(d); emit();
     const res = await call('submit', d.submission);

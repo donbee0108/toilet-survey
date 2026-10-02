@@ -127,6 +127,23 @@ header.bar { position: sticky; top: 0; z-index: 5; background: #fff; border-bott
 .bottom-nav { display: flex; justify-content: space-between; gap: 12px; margin-top: 24px; }
 .bottom-nav .btn { flex: 1; min-height: 64px; font-size: 21px; }
 
+/* 목차 */
+button.progress { border: 2px solid var(--line); border-radius: var(--radius); background: #fff; font: inherit; color: inherit; padding: 4px 8px; min-height: 56px; cursor: pointer; }
+.modal.toc { max-height: 90vh; }
+.toc-group { font-size: 19px; margin: 16px 0 6px; padding: 4px 10px; background: #ffe066; border: 2px solid #111; border-radius: 8px; }
+.toc-item { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 56px; margin: 6px 0; padding: 8px 12px; text-align: left; font: inherit; font-weight: 700; color: var(--text); background: #fff; border: 2px solid var(--line); border-radius: var(--radius); cursor: pointer; }
+.toc-item.current { border-width: 4px; border-color: var(--primary); background: #e6ecf7; }
+.toc-title { flex: 1; }
+.toc-stat { font-size: 16px; padding: 2px 8px; border-radius: 8px; background: var(--warn-bg); border: 1.5px solid var(--warn-line); white-space: nowrap; }
+.toc-stat.done { background: var(--ok-bg); border-color: var(--ok); color: var(--ok); }
+.toc-req { font-size: 15px; color: var(--no); border: 1.5px solid var(--no); border-radius: 6px; padding: 0 6px; white-space: nowrap; }
+
+/* 보완: 저장된 칸 잠김 */
+.mode-banner { max-width: 720px; margin: 8px auto 0; background: #e3f4e8; color: var(--ok); border: 2px solid var(--ok); border-radius: var(--radius); padding: 6px 12px; text-align: center; font-weight: 800; }
+.tag.saved { color: var(--ok); border-color: var(--ok); background: var(--ok-bg); }
+.item.is-locked .choice:not(.on) { opacity: .45; }
+.item.is-locked .choice:disabled { cursor: default; }
+
 /* 확인 창, 알림 */
 .modal-wrap { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 20; }
 .modal { background: #fff; border-radius: 16px; padding: 20px; max-width: 560px; width: 100%; max-height: 85vh; overflow: auto; }

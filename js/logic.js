@@ -52,6 +52,7 @@ export function newDraft({ surveyor = '', resurveyOf = null } = {}) {
     toilet: {}, hasMale: null, hasFemale: null,
     spaces: {}, // key → { values: {code: raw} }
     pageId: null, touched: {}, prefilled: {}, suggested: {},
+    mode: 'new', locked: {}, orig: {}, replaceable: {}, // mode: new | supplement
   };
 }
 
@@ -187,14 +188,16 @@ export function buildPages(cfg, draft) {
   for (const u of units) {
     if (u.item) { run.push(u.item); continue; }
     flushRun();
+    // 보완은 시트에 줄(공간번호)이 있는 칸만 보여 준다
+    const hasRow = (key) => draft.mode !== 'supplement' || !!draft.spaceIds?.[key];
     if (u.block === 'MULTI') {
-      for (const sp of multiSpaces(draft)) pages.push(...sectionPages(multiItems, sp.key, sp.label));
+      for (const sp of multiSpaces(draft).filter((x) => hasRow(x.key))) pages.push(...sectionPages(multiItems, sp.key, sp.label));
     } else {
       pages.push({ id: 'presence', type: 'presence', title: '남자·여자 화장실', ctx: TOILET });
-      if (draft.hasMale !== false) {
+      if (draft.hasMale !== false && hasRow(MA)) {
         pages.push(...sectionPages(mfItems.filter((it) => appliesTo(it, 'MALE')), MA, '남자화장실'));
       }
-      if (draft.hasFemale !== false) {
+      if (draft.hasFemale !== false && hasRow(FE)) {
         pages.push(...sectionPages(mfItems.filter((it) => appliesTo(it, 'FEMALE')), FE, '여자화장실'));
       }
     }
@@ -207,6 +210,7 @@ export function buildPages(cfg, draft) {
 /** 이 화면에서 비어 있는 필수 항목 */
 export function missingOnPage(cfg, draft, page) {
   if (page.type === 'presence') {
+    if (draft.mode === 'supplement') return []; // 보완에서는 바꿀 수 없음
     const out = [];
     if (draft.hasMale === null) out.push({ ctx: TOILET, code: '_hasMale', question: '남자화장실 있음?' });
     if (draft.hasFemale === null) out.push({ ctx: TOILET, code: '_hasFemale', question: '여자화장실 있음?' });
@@ -214,7 +218,7 @@ export function missingOnPage(cfg, draft, page) {
   }
   if (page.type !== 'items') return [];
   return page.codes
-    .filter((code) => cfg.byCode[code].required && isVisible(cfg, draft, page.ctx, code) && blank(getRaw(draft, page.ctx, code)))
+    .filter((code) => cfg.byCode[code].required && !isLocked(draft, page.ctx, code) && isVisible(cfg, draft, page.ctx, code) && blank(getRaw(draft, page.ctx, code)))
     .map((code) => ({ ctx: page.ctx, code, question: cfg.byCode[code].question }));
 }
 
@@ -247,7 +251,7 @@ export function invalidNumber(item, raw) {
 /** 제출 전에 반드시 고쳐야 하는 숫자 목록 */
 export function invalidAll(cfg, draft) {
   return buildPages(cfg, draft).filter((p) => p.type === 'items').flatMap((p) => p.codes
-    .filter((code) => isVisible(cfg, draft, p.ctx, code) && invalidNumber(cfg.byCode[code], getRaw(draft, p.ctx, code)))
+    .filter((code) => !isLocked(draft, p.ctx, code) && isVisible(cfg, draft, p.ctx, code) && invalidNumber(cfg.byCode[code], getRaw(draft, p.ctx, code)))
     .map((code) => ({ ctx: p.ctx, code, question: cfg.byCode[code].question, pageId: p.id, spaceLabel: p.spaceLabel || '' })));
 }
 
@@ -378,41 +382,150 @@ export function buildSubmission(cfg, draft, nowText) {
   };
 }
 
-/** 재조사: 이전 조사 행(열이름→값)으로 새 조사를 전부 미리 채운다 */
-export function prefillFromPrevious(cfg, draft, prev) {
-  const mark = (ctx, code) => { draft.prefilled[`${ctx}:${code}`] = true; };
-  // 건너뛰기·없는 화장실 때문에 자동으로 들어간 NA는 옮기지 않는다 (이번에 조건이 바뀌면 새로 답해야 하므로).
-  // 이번에도 건너뛰어지면 제출할 때 다시 NA가 된다.
-  const autoNA = (it, v) => String(v) === 'NA' && (it.rule || SIDE_ONLY_TOILET_ITEMS[it.code]);
-  for (const it of cfg.items.filter((i) => i.tab === '화장실')) {
-    const v = prev.toilet?.[it.var];
-    if (!blank(v) && !autoNA(it, v)) { draft.toilet[it.code] = String(v); mark(TOILET, it.code); }
-  }
-  const rows = prev.spaces || [];
-  const fill = (key, kind, row) => {
-    draft.spaces[key] = { values: {} };
-    for (const it of cfg.items.filter((i) => appliesTo(i, kind))) {
-      const v = row[it.var];
-      if (!blank(v) && !autoNA(it, v)) { draft.spaces[key].values[it.code] = String(v); mark(key, it.code); }
-    }
-  };
+/**
+ * 시트 행(열이름→값)을 하나씩 돌려준다: visit(ctx, item, value).
+ * 공간 행은 공간종류·장애인화장실구분·순번으로 칸(key)을 정하고, 남·여 화장실 있음 여부와 공간번호도 채운다.
+ */
+function readRows(cfg, draft, prev, visit) {
+  for (const it of cfg.items.filter((i) => i.tab === '화장실')) visit(TOILET, it, prev.toilet?.[it.var]);
   const allNA = (row, kind) => cfg.items.filter((i) => appliesTo(i, kind)).every((i) => String(row[i.var] ?? '') === 'NA');
+  const fill = (key, kind, row) => {
+    if (!draft.spaces[key]) draft.spaces[key] = { values: {} };
+    if (row['공간번호']) draft.spaceIds[key] = String(row['공간번호']);
+    for (const it of cfg.items.filter((i) => appliesTo(i, kind))) visit(key, it, row[it.var]);
+  };
   const sideCount = {};
-  for (const row of [...rows].sort((a, b) => Number(a['순번']) - Number(b['순번']))) {
+  for (const row of [...(prev.spaces || [])].sort((a, b) => Number(a['순번']) - Number(b['순번']))) {
     const kind = row['공간종류'];
     if (kind === 'MULTI') {
       const side = row['장애인화장실구분'] || 'SHARED';
       sideCount[side] = (sideCount[side] || 0) + 1;
       fill(`MULTI-${side}-${sideCount[side]}`, 'MULTI', row);
-    } else if (kind === 'MALE') {
-      draft.hasMale = !allNA(row, 'MALE');
-      if (draft.hasMale) fill(MA, 'MALE', row);
-    } else if (kind === 'FEMALE') {
-      draft.hasFemale = !allNA(row, 'FEMALE');
-      if (draft.hasFemale) fill(FE, 'FEMALE', row);
+    } else if (kind === 'MALE' || kind === 'FEMALE') {
+      const has = !allNA(row, kind);
+      if (kind === 'MALE') draft.hasMale = has; else draft.hasFemale = has;
+      fill(kind === 'MALE' ? MA : FE, kind, row);
     }
   }
+}
+
+/** 재조사: 이전 조사 행(열이름→값)으로 새 조사를 전부 미리 채운다 */
+export function prefillFromPrevious(cfg, draft, prev) {
+  // 건너뛰기·없는 화장실 때문에 자동으로 들어간 NA는 옮기지 않는다 (이번에 조건이 바뀌면 새로 답해야 하므로).
+  // 이번에도 건너뛰어지면 제출할 때 다시 NA가 된다.
+  const autoNA = (it, v) => String(v) === 'NA' && (it.rule || SIDE_ONLY_TOILET_ITEMS[it.code]);
+  readRows(cfg, draft, prev, (ctx, it, v) => {
+    if (blank(v) || autoNA(it, v)) return;
+    if ((ctx === MA && draft.hasMale === false) || (ctx === FE && draft.hasFemale === false)) return;
+    setRaw(draft, ctx, it.code, String(v));
+    draft.prefilled[`${ctx}:${it.code}`] = true;
+  });
+  draft.spaceIds = {}; // 재조사는 새 공간번호를 받는다
   return draft;
+}
+
+// 보완할 때 칸 구성을 바꾸는 항목은 잠근다 (칸을 새로 만들 수 없으므로)
+const STRUCTURE_CODES = Object.keys(MULTI_COUNT_CODES);
+
+/**
+ * 보완: 제출한 조사(같은 조사차수)의 빈칸만 채운다.
+ * 시트에 값이 있는 칸은 잠그고(locked), 빈칸만 입력받는다.
+ * 앞 질문이 비어서 자동으로 들어간 NA는 풀어 준다(replaceable) — 앞 질문을 채우면 뒤 질문도 답할 수 있게.
+ */
+export function supplementFromRows(cfg, draft, prev) {
+  draft.mode = 'supplement';
+  draft.serverId = prev.id;
+  draft.round = Number(prev.round);
+  draft.locked = {};
+  draft.orig = {};
+  draft.replaceable = {};
+  readRows(cfg, draft, prev, (ctx, it, v) => {
+    const key = `${ctx}:${it.code}`;
+    draft.orig[key] = blank(v) ? '' : String(v);
+    if (!blank(v)) { setRaw(draft, ctx, it.code, String(v)); draft.locked[key] = true; }
+  });
+  for (const code of STRUCTURE_CODES) draft.locked[`${TOILET}:${code}`] = true;
+  // 자동 NA 풀기: NA인데, 그 조건이 '앞 질문이 빈칸이면 건너뜀'으로 동작하는 규칙(아니면·미만)이고
+  // 앞 질문이 빈칸(또는 그 역시 자동 NA)일 때. '…이면 건너뜀'(eq)은 빈칸이면 건너뛰지 않으므로 그 NA는 직접 고른 것.
+  for (let pass = 0; pass <= cfg.items.length; pass++) {
+    let changed = false;
+    for (const [key, v] of Object.entries(draft.orig)) {
+      if (v !== 'NA' || draft.replaceable[key]) continue;
+      const [ctx, code] = key.split(':');
+      const rule = cfg.byCode[code]?.rule;
+      if (!rule || rule.error || !shouldSkip(rule, '')) continue;
+      const refCtx = cfg.byCode[rule.ref]?.tab === '화장실' ? TOILET : ctx;
+      const refKey = `${refCtx}:${rule.ref}`;
+      if (draft.orig[refKey] === '' || draft.replaceable[refKey]) {
+        draft.replaceable[key] = true;
+        delete draft.locked[key];
+        setRaw(draft, ctx, code, '');
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  return draft;
+}
+
+export const isLocked = (draft, ctx, code) => !!draft.locked?.[`${ctx}:${code}`];
+
+/** 보완 제출용: 시트 값과 달라진(새로 채운) 칸만 보낸다 (docs/API.md supplement) */
+export function buildSupplementPayload(cfg, draft, nowText) {
+  const changed = (ctx, it) => {
+    const key = `${ctx}:${it.code}`;
+    if (draft.locked[key]) return undefined;
+    const v = finalValue(cfg, draft, ctx, it.code);
+    if (blank(v) || String(v) === (draft.orig[key] ?? '')) return undefined;
+    return v;
+  };
+  const replaceNA = (ctx) => cfg.items.filter((it) => draft.replaceable[`${ctx}:${it.code}`]).map((it) => it.var);
+  const toilet = {};
+  for (const it of cfg.items.filter((i) => i.tab === '화장실')) {
+    const v = changed(TOILET, it);
+    if (v !== undefined) toilet[it.var] = v;
+  }
+  const spaces = [];
+  for (const sp of allSpaces(draft)) {
+    const spaceId = draft.spaceIds[sp.key];
+    if (!spaceId) continue;
+    const values = {};
+    for (const it of cfg.items.filter((i) => appliesTo(i, sp.kind))) {
+      const v = changed(sp.key, it);
+      if (v !== undefined) values[it.var] = v;
+    }
+    if (Object.keys(values).length) spaces.push({ spaceId, values, replaceNA: replaceNA(sp.key) });
+  }
+  const count = Object.keys(toilet).length + spaces.reduce((n, s) => n + Object.keys(s.values).length, 0);
+  return {
+    payload: {
+      action: 'supplement', clientId: draft.localId, id: draft.serverId, round: draft.round,
+      meta: { 입력시각: nowText, 조사자: draft.surveyor }, toilet, replaceNA: replaceNA(TOILET), spaces,
+    },
+    count,
+  };
+}
+
+/** 제출한 조사(기기에 남은 기록)를 시트 행 모양으로 — 인터넷 없이 보완을 시작할 때 쓴다 */
+export function rowsFromSubmitted(d) {
+  return {
+    id: d.serverId, round: d.round, toilet: d.submission.toilet,
+    spaces: d.submission.spaces.map((sp, i) => ({
+      ...sp.values, 공간번호: d.spaceIds[d.spaceKeys[i]], 공간종류: sp.kind, 장애인화장실구분: sp.side, 순번: sp.seq,
+    })),
+  };
+}
+
+/** 목차용: 화면마다 보이는 문항 수와 답한 수, 빈 필수 수 */
+export function pageStats(cfg, draft, page) {
+  if (page.type === 'presence') {
+    const answered = [draft.hasMale, draft.hasFemale].filter((v) => v !== null).length;
+    return { total: 2, answered, missingRequired: 2 - answered };
+  }
+  if (page.type !== 'items') return null;
+  const visible = page.codes.filter((code) => isVisible(cfg, draft, page.ctx, code));
+  const answered = visible.filter((code) => !blank(getRaw(draft, page.ctx, code))).length;
+  return { total: visible.length, answered, missingRequired: missingOnPage(cfg, draft, page).length };
 }
 
 /** 진행률: 필수 항목 중 답한 비율 대신 화면 위치 기준 */
