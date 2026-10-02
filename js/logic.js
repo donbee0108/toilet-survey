@@ -1,0 +1,422 @@
+// 조사 로직 (화면·저장과 무관한 순수 함수). 브라우저와 Node 테스트에서 함께 쓴다.
+import { parseSkip, shouldSkip } from './skip.js';
+
+// 요청서에 이름이 나온 항목코드만 여기 둔다. 기준 숫자는 모두 항목정의에서 읽는다.
+export const MULTI_COUNT_CODES = { C1a: 'MALE', C1b: 'FEMALE', C1c: 'SHARED' };
+const SIDE_ONLY_TOILET_ITEMS = { F3a: 'MALE', F3b: 'FEMALE' }; // 그 쪽 화장실이 없으면 NA
+const SIDE_LABEL = { MALE: '남자 쪽', FEMALE: '여자 쪽', SHARED: '남녀 공용' };
+const MAX_MULTI_PER_SIDE = 10;
+const PAGE_MAX = 8;   // 한 화면 최대 문항 수
+const PAGE_SPLIT = 7; // 나눌 때 목표 문항 수
+
+export const TOILET = 't';
+export const MA = 'MA';
+export const FE = 'FE';
+
+const blank = (v) => v === undefined || v === null || v === '';
+
+/** 서버 config → 앱에서 쓰기 좋은 형태 */
+export function prepareConfig(raw) {
+  const ord = (x) => (x.order == null ? Infinity : x.order); // 순서가 비면 맨 뒤 (서버와 같게)
+  const items = [...raw.items].sort((a, b) => ord(a) - ord(b));
+  const byCode = {};
+  const byVar = {};
+  for (const it of items) {
+    it.rule = parseSkip(it.skip);
+    byCode[it.code] = it;
+    byVar[it.var] = it;
+  }
+  return { ...raw, items, byCode, byVar };
+}
+
+/** 이 항목이 이 공간 종류에 해당하는가 */
+export function appliesTo(item, kind) {
+  if (item.tab === '화장실') return kind === TOILET;
+  switch (item.scope) {
+    case '장애인화장실': return kind === 'MULTI';
+    case '남·여': return kind === 'MALE' || kind === 'FEMALE';
+    case '남': return kind === 'MALE';
+    case '여': return kind === 'FEMALE';
+    default: return false;
+  }
+}
+
+export function newDraft({ surveyor = '', resurveyOf = null } = {}) {
+  const now = Date.now();
+  return {
+    localId: `d-${now}-${Math.random().toString(36).slice(2, 8)}`,
+    createdAt: now, updatedAt: now,
+    surveyor, resurveyOf, lat: null, lng: null,
+    status: 'editing', // editing → queued → sending → photos → done | failed
+    serverId: null, round: null, spaceIds: {}, error: '',
+    toilet: {}, hasMale: null, hasFemale: null,
+    spaces: {}, // key → { values: {code: raw} }
+    pageId: null, touched: {}, prefilled: {}, suggested: {},
+  };
+}
+
+/** 장애인 화장실 칸 목록 (C1a·C1b·C1c 개수 → 남 → 여 → 공용 순) */
+export function multiSpaces(draft) {
+  const list = [];
+  for (const [code, side] of Object.entries(MULTI_COUNT_CODES)) {
+    const n = Math.min(MAX_MULTI_PER_SIDE, Math.max(0, parseInt(draft.toilet[code], 10) || 0));
+    for (let s = 1; s <= n; s++) {
+      list.push({ key: `MULTI-${side}-${s}`, kind: 'MULTI', side, sideSeq: s, label: `${SIDE_LABEL[side]} 장애인 화장실 ${s}` });
+    }
+  }
+  list.forEach((sp, i) => { sp.index = i + 1; });
+  return list;
+}
+
+export function allSpaces(draft) {
+  return [
+    ...multiSpaces(draft),
+    { key: MA, kind: 'MALE', side: '', label: '남자화장실', present: draft.hasMale },
+    { key: FE, kind: 'FEMALE', side: '', label: '여자화장실', present: draft.hasFemale },
+  ];
+}
+
+export function spaceInfo(draft, key) {
+  if (key === TOILET) return { key, kind: TOILET, label: '' };
+  return allSpaces(draft).find((s) => s.key === key) || null;
+}
+
+export function getRaw(draft, ctx, code) {
+  if (ctx === TOILET) return draft.toilet[code];
+  return draft.spaces[ctx]?.values?.[code];
+}
+
+export function setRaw(draft, ctx, code, value) {
+  if (ctx === TOILET) { draft.toilet[code] = value; return; }
+  if (!draft.spaces[ctx]) draft.spaces[ctx] = { values: {} };
+  draft.spaces[ctx].values[code] = value;
+}
+
+/** 그 쪽 화장실이 없다고 답해서 강제로 NA가 되는가 */
+function forcedNA(cfg, draft, ctx, code) {
+  if (ctx === MA && draft.hasMale === false) return true;
+  if (ctx === FE && draft.hasFemale === false) return true;
+  if (ctx === TOILET) {
+    const side = SIDE_ONLY_TOILET_ITEMS[code];
+    if (side === 'MALE' && draft.hasMale === false) return true;
+    if (side === 'FEMALE' && draft.hasFemale === false) return true;
+  }
+  return false;
+}
+
+/** 건너뛰기 조건이 참인가. 앞 항목도 건너뛰어졌으면 그 값은 NA로 본다(연쇄). */
+export function isSkipped(cfg, draft, ctx, code, depth = 0) {
+  const item = cfg.byCode[code];
+  if (!item?.rule || item.rule.error || depth > 10) return false;
+  const refItem = cfg.byCode[item.rule.ref];
+  if (!refItem) return false;
+  // 공간 항목의 조건은 같은 공간의 답을 먼저 보고, 화장실 항목이면 화장실 답을 본다.
+  const refCtx = refItem.tab === '화장실' ? TOILET : ctx;
+  const refValue = finalValue(cfg, draft, refCtx, refItem.code, depth + 1);
+  return shouldSkip(item.rule, refValue);
+}
+
+/** 시트에 저장될 값 */
+export function finalValue(cfg, draft, ctx, code, depth = 0) {
+  const item = cfg.byCode[code];
+  if (forcedNA(cfg, draft, ctx, code)) return 'NA';
+  if (isSkipped(cfg, draft, ctx, code, depth)) return 'NA';
+  return normalize(item, getRaw(draft, ctx, code));
+}
+
+export function normalize(item, raw) {
+  if (blank(raw)) return '';
+  if (raw === 'NA') return 'NA';
+  if (item && (item.type === '숫자' || item.type === '정수')) {
+    const n = Number(String(raw).replace(/,/g, '').trim());
+    return Number.isFinite(n) ? n : String(raw).trim();
+  }
+  return typeof raw === 'string' ? raw.trim() : raw;
+}
+
+export function isVisible(cfg, draft, ctx, code) {
+  return !forcedNA(cfg, draft, ctx, code) && !isSkipped(cfg, draft, ctx, code);
+}
+
+function chunk(codes) {
+  if (codes.length <= PAGE_MAX) return [codes];
+  const n = Math.ceil(codes.length / PAGE_SPLIT);
+  const size = Math.ceil(codes.length / n);
+  const out = [];
+  for (let i = 0; i < codes.length; i += size) out.push(codes.slice(i, i + size));
+  return out;
+}
+
+function sectionPages(items, ctx, spaceLabel) {
+  const pages = [];
+  let cur = null;
+  const flush = () => {
+    if (!cur) return;
+    const parts = chunk(cur.codes);
+    parts.forEach((codes, i) => pages.push({
+      id: `${ctx}|${cur.section}|${codes[0]}`, type: 'items', ctx, spaceLabel,
+      title: cur.section + (parts.length > 1 ? ` (${i + 1}/${parts.length})` : ''), codes,
+    }));
+    cur = null;
+  };
+  for (const it of items) {
+    if (!cur || cur.section !== it.section) { flush(); cur = { section: it.section, codes: [] }; }
+    cur.codes.push(it.code);
+  }
+  flush();
+  return pages;
+}
+
+/**
+ * 화면 목록. 항목정의 '순서'대로 화장실 항목을 늘어놓고,
+ * 장애인 화장실 항목 묶음과 남·여 화장실 항목 묶음은 그 묶음의 가장 앞 순서 자리에 끼워 넣는다.
+ */
+export function buildPages(cfg, draft) {
+  const items = cfg.items;
+  const multiItems = items.filter((it) => appliesTo(it, 'MULTI'));
+  const mfItems = items.filter((it) => appliesTo(it, 'MALE') || appliesTo(it, 'FEMALE'));
+  const units = items.filter((it) => it.tab === '화장실').map((it) => ({ order: it.order, item: it }));
+  if (multiItems.length) units.push({ order: multiItems[0].order, block: 'MULTI' });
+  if (mfItems.length) units.push({ order: mfItems[0].order, block: 'MF' });
+  const ord = (u) => (u.order == null ? Infinity : u.order);
+  units.sort((a, b) => (ord(a) - ord(b)) || (a.block ? 1 : -1));
+
+  const pages = [{ id: 'start', type: 'start', title: '조사 시작' }];
+  let run = [];
+  const flushRun = () => { pages.push(...sectionPages(run, TOILET, '')); run = []; };
+  for (const u of units) {
+    if (u.item) { run.push(u.item); continue; }
+    flushRun();
+    if (u.block === 'MULTI') {
+      for (const sp of multiSpaces(draft)) pages.push(...sectionPages(multiItems, sp.key, sp.label));
+    } else {
+      pages.push({ id: 'presence', type: 'presence', title: '남자·여자 화장실', ctx: TOILET });
+      if (draft.hasMale !== false) {
+        pages.push(...sectionPages(mfItems.filter((it) => appliesTo(it, 'MALE')), MA, '남자화장실'));
+      }
+      if (draft.hasFemale !== false) {
+        pages.push(...sectionPages(mfItems.filter((it) => appliesTo(it, 'FEMALE')), FE, '여자화장실'));
+      }
+    }
+  }
+  flushRun();
+  pages.push({ id: 'review', type: 'review', title: '확인과 제출' });
+  return pages;
+}
+
+/** 이 화면에서 비어 있는 필수 항목 */
+export function missingOnPage(cfg, draft, page) {
+  if (page.type === 'presence') {
+    const out = [];
+    if (draft.hasMale === null) out.push({ ctx: TOILET, code: '_hasMale', question: '남자화장실 있음?' });
+    if (draft.hasFemale === null) out.push({ ctx: TOILET, code: '_hasFemale', question: '여자화장실 있음?' });
+    return out;
+  }
+  if (page.type !== 'items') return [];
+  return page.codes
+    .filter((code) => cfg.byCode[code].required && isVisible(cfg, draft, page.ctx, code) && blank(getRaw(draft, page.ctx, code)))
+    .map((code) => ({ ctx: page.ctx, code, question: cfg.byCode[code].question }));
+}
+
+export function missingAll(cfg, draft) {
+  return buildPages(cfg, draft).flatMap((p) => missingOnPage(cfg, draft, p).map((m) => ({ ...m, pageId: p.id, pageTitle: p.title, spaceLabel: p.spaceLabel || '' })));
+}
+
+/** 숫자 값 이상 여부 → 경고 문구 또는 '' */
+export function numberWarning(item, raw) {
+  if (blank(raw) || raw === 'NA') return '';
+  const s = String(raw).replace(/,/g, '').trim();
+  const v = Number(s);
+  if (!Number.isFinite(v)) return '숫자만 입력해 주세요.';
+  const needsInt = item.type === '정수' || item.unit === 'cm';
+  if (needsInt && !Number.isInteger(v)) return item.unit === 'cm' ? 'cm는 정수로 적습니다(소수점 없이).' : '정수로 입력해 주세요.';
+  if (item.unit === 'cm' && (v < 0 || v > 500)) return `${v}cm가 맞나요? 보통 0~500cm 사이입니다.`;
+  if (item.unit === '개' && (v < 0 || v > 100)) return `${v}개가 맞나요?`;
+  if (v < 0) return '0보다 작은 값이 맞나요?';
+  return '';
+}
+
+/** 숫자 칸에 숫자가 아닌 값, cm·정수 칸에 소수가 있으면 true (범위 밖 값은 경고만) */
+export function invalidNumber(item, raw) {
+  if (blank(raw) || raw === 'NA' || !['숫자', '정수'].includes(item.type)) return false;
+  const v = Number(String(raw).replace(/,/g, '').trim());
+  if (!Number.isFinite(v)) return true;
+  return (item.type === '정수' || item.unit === 'cm') && !Number.isInteger(v);
+}
+
+/** 제출 전에 반드시 고쳐야 하는 숫자 목록 */
+export function invalidAll(cfg, draft) {
+  return buildPages(cfg, draft).filter((p) => p.type === 'items').flatMap((p) => p.codes
+    .filter((code) => isVisible(cfg, draft, p.ctx, code) && invalidNumber(cfg.byCode[code], getRaw(draft, p.ctx, code)))
+    .map((code) => ({ ctx: p.ctx, code, question: cfg.byCode[code].question, pageId: p.id, spaceLabel: p.spaceLabel || '' })));
+}
+
+/** 설정 점검: 변수명이 입력 탭 1행에 없으면 그 값은 저장되지 않는다 */
+export function headerProblems(cfg) {
+  const out = [];
+  for (const it of cfg.items) {
+    const h = cfg.headers?.[it.tab];
+    if (h && !h.includes(it.var)) out.push(`${it.code}(${it.var})가 '${it.tab}' 탭 1행에 없습니다`);
+  }
+  return out;
+}
+
+/** 법·BF·UD 기준 충족 표시 (값이 없는 기준은 표시하지 않음) */
+export function criteriaBadges(item, raw) {
+  if (blank(raw) || raw === 'NA') return [];
+  const v = Number(String(raw).replace(/,/g, ''));
+  if (!Number.isFinite(v)) return [];
+  const out = [];
+  for (const [name, min, max] of [['법', item.lawMin, item.lawMax], ['BF', item.bfMin, item.bfMax], ['UD', item.udMin, item.udMax]]) {
+    if (min == null && max == null) continue;
+    const ok = (min == null || v >= min) && (max == null || v <= max);
+    const range = min != null && max != null ? (min === max ? `${min}` : `${min}~${max}`) : min != null ? `${min} 이상` : `${max} 이하`;
+    out.push({ name, ok, range });
+  }
+  return out;
+}
+
+const num = (v) => (blank(v) || v === 'NA' ? null : Number(v));
+
+/** H 종합 요약 자동 제안. { code: { value, reason } } — value가 null이면 제안 없음 */
+export function suggestH(cfg, draft) {
+  const fv = (ctx, code) => (cfg.byCode[code] ? finalValue(cfg, draft, ctx, code) : '');
+  const t = (code) => cfg.byCode[code]?.lawMin;
+  const multis = multiSpaces(draft);
+  const out = {};
+
+  const accessOk = fv(TOILET, 'A3a') === 'N' || fv(TOILET, 'A4') === 'Y';
+  const wheel = (sp) => {
+    const need = ['C4', 'C7', 'C10a', 'C10b', 'C11'];
+    const values = Object.fromEntries(need.map((c) => [c, fv(sp.key, c)]));
+    const known = need.every((c) => !blank(values[c]));
+    const ge = (c) => num(values[c]) != null && (t(c) == null || num(values[c]) >= t(c));
+    const ok = values.C4 === 'OK' && ge('C7') && ge('C10a') && ge('C10b') && ge('C11') && accessOk;
+    return { ok, known };
+  };
+  if (cfg.byCode.H1a) {
+    const res = multis.map((sp) => ({ sp, ...wheel(sp) }));
+    const hit = res.filter((r) => r.ok);
+    const accessKnown = !blank(fv(TOILET, 'A3a'));
+    const std = `(이용 가능, 문 폭 ${t('C7')}·바닥 ${t('C10a')}×${t('C10b')}·변기 옆 ${t('C11')}cm 이상, 턱 없음 또는 경사로)`;
+    if (hit.length) out.H1a = { value: 'Y', reason: `조건을 모두 만족: ${hit.map((r) => r.sp.label).join(', ')} ${std}` };
+    else if (!multis.length) out.H1a = { value: 'N', reason: '장애인 화장실이 없습니다.' };
+    else if (res.every((r) => r.known) && accessKnown) out.H1a = { value: 'N', reason: `조건을 모두 만족하는 장애인 화장실이 없습니다 ${std}` };
+    else out.H1a = { value: null, reason: '장애인 화장실 칸의 값이 비어 있어 제안하지 못했습니다.' };
+  }
+  if (cfg.byCode.H2) {
+    const hit = multis.filter((sp) => fv(sp.key, 'C3') === 'Y' && fv(sp.key, 'C4') === 'OK');
+    const known = multis.every((sp) => !blank(fv(sp.key, 'C3')) && !blank(fv(sp.key, 'C4')));
+    if (hit.length) out.H2 = { value: 'Y', reason: `이성 동반 가능하고 쓸 수 있는 칸: ${hit.map((s) => s.label).join(', ')}` };
+    else if (!multis.length) out.H2 = { value: 'N', reason: '장애인 화장실이 없습니다.' };
+    else if (known) out.H2 = { value: 'N', reason: '이성 동반 가능하고 쓸 수 있는 장애인 화장실이 없습니다.' };
+    else out.H2 = { value: null, reason: 'C3·C4 값이 비어 있어 제안하지 못했습니다.' };
+  }
+  for (const [target, src] of [['H3a', 'B2a'], ['H3b', 'B3'], ['H3c', 'B4a']]) {
+    if (!cfg.byCode[target]) continue;
+    const v = fv(TOILET, src);
+    const allowed = (cfg.choices[cfg.byCode[target].list] || []).some((c) => c.value === v);
+    out[target] = blank(v) || !allowed
+      ? { value: null, reason: `${src} 답이 없어 제안하지 못했습니다.` }
+      : { value: v, reason: `${src}(${cfg.byCode[src]?.question}) 답을 따랐습니다.` };
+  }
+  if (cfg.byCode.H4) {
+    const f6 = fv(TOILET, 'F6');
+    const f7 = fv(TOILET, 'F7');
+    if (f6 === 'Y' || f7 === 'TEXT') out.H4 = { value: 'Y', reason: f6 === 'Y' ? "'호출됨' 불빛이 있습니다(F6)." : '문자·화상으로 소통할 수 있습니다(F7).' };
+    else if (!blank(f6) && !blank(f7)) out.H4 = { value: 'N', reason: "'호출됨' 불빛도, 문자·화상 소통도 없습니다(F6·F7)." };
+    else out.H4 = { value: null, reason: 'F6·F7 답이 없어 제안하지 못했습니다.' };
+  }
+  return out;
+}
+
+/** 제안을 답에 채움: 비어 있거나, 이전 제안을 조사자가 손대지 않았을 때만 */
+export function applySuggestions(cfg, draft) {
+  const sug = suggestH(cfg, draft);
+  for (const [code, s] of Object.entries(sug)) {
+    const cur = draft.toilet[code];
+    const untouchedSuggestion = draft.suggested[code] !== undefined && !draft.touched[`t:${code}`];
+    if (blank(cur) || untouchedSuggestion) {
+      if (s.value == null) {
+        if (untouchedSuggestion) { delete draft.toilet[code]; delete draft.suggested[code]; }
+      } else {
+        draft.toilet[code] = s.value;
+        draft.suggested[code] = s.value;
+      }
+    }
+  }
+  return sug;
+}
+
+/** 제출용 데이터 (docs/API.md submit) */
+export function buildSubmission(cfg, draft, nowText) {
+  const toilet = {};
+  for (const it of cfg.items.filter((i) => i.tab === '화장실')) toilet[it.var] = finalValue(cfg, draft, TOILET, it.code);
+  const spaces = [];
+  const spaceKeys = [];
+  // 공간 종류상 해당 없는 항목은 NA (빈칸 = 조사 안 함과 구분)
+  const valuesFor = (kind, key) => {
+    const v = {};
+    for (const it of cfg.items.filter((i) => i.tab === '공간')) v[it.var] = appliesTo(it, kind) ? finalValue(cfg, draft, key, it.code) : 'NA';
+    return v;
+  };
+  for (const sp of multiSpaces(draft)) {
+    spaces.push({ kind: 'MULTI', side: sp.side, seq: sp.index, values: valuesFor('MULTI', sp.key) });
+    spaceKeys.push(sp.key);
+  }
+  spaces.push({ kind: 'MALE', side: '', seq: 1, values: valuesFor('MALE', MA) });
+  spaceKeys.push(MA);
+  spaces.push({ kind: 'FEMALE', side: '', seq: 1, values: valuesFor('FEMALE', FE) });
+  spaceKeys.push(FE);
+  return {
+    payload: {
+      action: 'submit', clientId: draft.localId, resurveyOf: draft.resurveyOf || null,
+      meta: { 입력시각: nowText, 조사자: draft.surveyor, 위도: draft.lat ?? '', 경도: draft.lng ?? '' },
+      toilet, spaces,
+    },
+    spaceKeys,
+  };
+}
+
+/** 재조사: 이전 조사 행(열이름→값)으로 새 조사를 전부 미리 채운다 */
+export function prefillFromPrevious(cfg, draft, prev) {
+  const mark = (ctx, code) => { draft.prefilled[`${ctx}:${code}`] = true; };
+  // 건너뛰기·없는 화장실 때문에 자동으로 들어간 NA는 옮기지 않는다 (이번에 조건이 바뀌면 새로 답해야 하므로).
+  // 이번에도 건너뛰어지면 제출할 때 다시 NA가 된다.
+  const autoNA = (it, v) => String(v) === 'NA' && (it.rule || SIDE_ONLY_TOILET_ITEMS[it.code]);
+  for (const it of cfg.items.filter((i) => i.tab === '화장실')) {
+    const v = prev.toilet?.[it.var];
+    if (!blank(v) && !autoNA(it, v)) { draft.toilet[it.code] = String(v); mark(TOILET, it.code); }
+  }
+  const rows = prev.spaces || [];
+  const fill = (key, kind, row) => {
+    draft.spaces[key] = { values: {} };
+    for (const it of cfg.items.filter((i) => appliesTo(i, kind))) {
+      const v = row[it.var];
+      if (!blank(v) && !autoNA(it, v)) { draft.spaces[key].values[it.code] = String(v); mark(key, it.code); }
+    }
+  };
+  const allNA = (row, kind) => cfg.items.filter((i) => appliesTo(i, kind)).every((i) => String(row[i.var] ?? '') === 'NA');
+  const sideCount = {};
+  for (const row of [...rows].sort((a, b) => Number(a['순번']) - Number(b['순번']))) {
+    const kind = row['공간종류'];
+    if (kind === 'MULTI') {
+      const side = row['장애인화장실구분'] || 'SHARED';
+      sideCount[side] = (sideCount[side] || 0) + 1;
+      fill(`MULTI-${side}-${sideCount[side]}`, 'MULTI', row);
+    } else if (kind === 'MALE') {
+      draft.hasMale = !allNA(row, 'MALE');
+      if (draft.hasMale) fill(MA, 'MALE', row);
+    } else if (kind === 'FEMALE') {
+      draft.hasFemale = !allNA(row, 'FEMALE');
+      if (draft.hasFemale) fill(FE, 'FEMALE', row);
+    }
+  }
+  return draft;
+}
+
+/** 진행률: 필수 항목 중 답한 비율 대신 화면 위치 기준 */
+export function pageIndex(pages, pageId) {
+  const i = pages.findIndex((p) => p.id === pageId);
+  return i < 0 ? 0 : i;
+}

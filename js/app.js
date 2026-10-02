@@ -1,0 +1,589 @@
+// 화면. 상태는 기기(IndexedDB)에 저장되어 앱을 닫아도 이어서 할 수 있다.
+import * as L from './logic.js';
+import { drafts, photos, kv, requestPersistence } from './store.js';
+import { call, apiUrl } from './api.js';
+import { resizePhoto } from './photo.js';
+import { processQueue, startSync, onSyncChange } from './sync.js';
+import { validateSkips } from './skip.js';
+
+const $app = document.getElementById('app');
+const state = { cfg: null, cfgInfo: null, draft: null, pages: [], view: 'home', toilets: null, search: '' };
+
+// ---------- 도구 ----------
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const blank = (v) => v === undefined || v === null || v === '';
+const ls = {
+  get: (k) => { try { return localStorage.getItem(k) || ''; } catch { return ''; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* 무시 */ } },
+};
+const pad = (n) => String(n).padStart(2, '0');
+function nowText(t = new Date()) {
+  return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())} ${pad(t.getHours())}:${pad(t.getMinutes())}`;
+}
+const dateText = (ms) => (ms ? nowText(new Date(ms)) : '');
+
+let saveTimer = null;
+function saveSoon() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveNow, 300);
+}
+async function saveNow() {
+  clearTimeout(saveTimer);
+  if (state.draft && state.draft.status === 'editing') await drafts.put(state.draft);
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveNow(); });
+window.addEventListener('pagehide', saveNow);
+
+function toast(msg) {
+  const el = document.createElement('div');
+  el.className = 'toast'; el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+/** 확인 창. buttons: [{label, value, primary}] → 누른 버튼의 value */
+function modal(title, bodyHtml, buttons) {
+  return new Promise((resolve) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'modal-wrap';
+    wrap.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="mt">
+      <h2 id="mt">${esc(title)}</h2><div class="modal-body">${bodyHtml}</div>
+      <div class="modal-buttons">${buttons.map((b, i) => `<button class="btn ${b.primary ? 'primary' : ''}" data-i="${i}">${esc(b.label)}</button>`).join('')}</div></div>`;
+    wrap.addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-i]');
+      if (!b) return;
+      wrap.remove();
+      resolve(buttons[Number(b.dataset.i)].value);
+    });
+    document.body.appendChild(wrap);
+    wrap.querySelector('button.primary, button')?.focus();
+  });
+}
+const confirmBox = (title, body, yes = '예', no = '아니오') => modal(title, body, [{ label: no, value: false }, { label: yes, value: true, primary: true }]);
+
+// ---------- 설정 불러오기 ----------
+async function loadConfig({ force = false } = {}) {
+  const cached = await kv.get('config');
+  if (cached && !force) useConfig(cached.data, cached.fetchedAt, true);
+  if (!navigator.onLine || !apiUrl()) return;
+  try {
+    const data = await call('config');
+    await kv.set('config', { data, fetchedAt: Date.now() });
+    useConfig(data, Date.now(), false);
+    if (force) toast('조사 항목을 새로 불러왔습니다.');
+  } catch (e) {
+    if (!cached || force) state.cfgError = e.message;
+  }
+}
+function useConfig(data, fetchedAt, fromCache) {
+  state.cfg = L.prepareConfig(structuredClone(data));
+  state.cfgInfo = { fetchedAt, fromCache, count: data.items.length, version: data.version, problems: [...validateSkips(data.items, data.choices), ...L.headerProblems(state.cfg)] };
+  state.cfgError = '';
+}
+
+// ---------- 홈 ----------
+const STATUS_TEXT = { queued: '전송 대기', sending: '보내는 중', photos: '사진 보내는 중', done: '전송 완료', failed: '전송 실패' };
+
+async function renderHome() {
+  state.view = 'home';
+  state.draft = null;
+  const all = (await drafts.all()).sort((a, b) => b.updatedAt - a.updatedAt);
+  const allPhotos = await photos.all();
+  const photoStat = (id) => {
+    const ps = allPhotos.filter((p) => p.localId === id);
+    return { total: ps.length, done: ps.filter((p) => p.status === 'done').length };
+  };
+  const editing = all.filter((d) => d.status === 'editing');
+  const sent = all.filter((d) => d.status !== 'editing');
+  const needsPw = !ls.get('ts.password');
+  const noUrl = !apiUrl() || apiUrl().includes('여기에');
+  const info = state.cfgInfo;
+
+  $app.innerHTML = `
+  <header class="home-head"><h1>공중화장실 접근성 조사</h1>
+    <div class="net ${navigator.onLine ? 'on' : 'off'}">${navigator.onLine ? '인터넷 연결됨' : '인터넷 끊김 — 입력은 계속할 수 있습니다'}</div></header>
+  <main class="home">
+    ${noUrl ? '<div class="alert">관리자 설정 필요: config.js에 웹앱 주소가 없습니다.</div>' : ''}
+    ${state.cfgError ? `<div class="alert">조사 항목을 불러오지 못했습니다: ${esc(state.cfgError)}</div>` : ''}
+    ${info?.problems?.length ? `<div class="alert">항목정의를 확인해 주세요 (관리자에게 알려 주세요): ${esc(info.problems.join(' / '))}</div>` : ''}
+
+    <section class="card">
+      <label class="field-label" for="surveyor">조사자 이름</label>
+      <input id="surveyor" class="text-input" autocomplete="name" value="${esc(ls.get('ts.surveyor'))}" placeholder="이름을 적어 주세요">
+      ${needsPw ? `<label class="field-label" for="pw">조사팀 비밀번호</label>
+      <div class="row"><input id="pw" class="text-input grow" type="password" autocomplete="current-password" placeholder="안내받은 비밀번호" enterkeyhint="done">
+      <button class="btn primary" id="pwok">확인</button></div>` : ''}
+    </section>
+
+    <button class="btn primary big" id="new" ${state.cfg ? '' : 'disabled'}>새 조사 시작</button>
+    <button class="btn big" id="resurvey" ${state.cfg ? '' : 'disabled'}>이미 조사한 화장실 다시 조사</button>
+    ${!state.cfg ? '<p class="hint">조사 항목을 불러와야 시작할 수 있습니다. 인터넷에 연결한 뒤 비밀번호를 넣고 아래 "조사 항목 새로 불러오기"를 눌러 주세요.</p>' : ''}
+
+    ${editing.length ? `<h2 class="sec">이어서 하기</h2>
+      ${editing.map((d) => `<div class="card row">
+        <div class="grow"><b>${esc(d.toilet.B0a || '(이름 없음)')}</b>${d.resurveyOf ? ` <span class="tag">재조사 ${esc(d.resurveyOf)}</span>` : ''}
+          <div class="sub">${esc(d.surveyor)} · ${dateText(d.updatedAt)} 저장</div></div>
+        <button class="btn primary" data-open="${d.localId}">이어서</button>
+        <button class="btn danger small" data-del="${d.localId}" aria-label="삭제">삭제</button></div>`).join('')}` : ''}
+
+    ${sent.length ? `<h2 class="sec">전송 상태</h2>
+      ${sent.map((d) => {
+        const ps = photoStat(d.localId);
+        return `<div class="card row">
+          <div class="grow"><b>${esc(d.toilet.B0a || '(이름 없음)')}</b> ${d.serverId ? `<span class="tag">${esc(d.serverId)} · ${d.round}차</span>` : ''}
+            <div class="sub">${dateText(d.queuedAt)} 제출 · 사진 ${ps.done}/${ps.total}장</div>
+            ${d.error ? `<div class="err">${esc(d.error)}</div>` : ''}
+            ${d.warnings?.length ? `<div class="err">시트에 열이 없어 저장되지 않은 값: ${esc(d.warnings.join(', '))} — 관리자에게 알려 주세요.</div>` : ''}</div>
+          <span class="status s-${d.status}">${STATUS_TEXT[d.status] || d.status}</span></div>`;
+      }).join('')}
+      <div class="row gap">
+        <button class="btn" id="retry">지금 다시 보내기</button>
+        <button class="btn" id="clean">완료된 기록 정리</button></div>` : ''}
+
+    <details class="card"><summary>설정·정보</summary>
+      <p>조사 항목: ${info ? `${esc(info.version)} · ${info.count}개 · ${dateText(info.fetchedAt)} 불러옴${info.fromCache ? ' (기기에 저장된 사본)' : ''}` : '없음'}</p>
+      <button class="btn" id="reload">조사 항목 새로 불러오기</button>
+      <button class="btn" id="resetpw">비밀번호 다시 입력</button>
+    </details>
+  </main>`;
+
+  const nameEl = document.getElementById('surveyor');
+  nameEl.addEventListener('input', () => ls.set('ts.surveyor', nameEl.value.trim()));
+  const pwEl = document.getElementById('pw');
+  const submitPw = async () => {
+    if (!pwEl.value.trim()) { toast('비밀번호를 적어 주세요.'); return; }
+    ls.set('ts.password', pwEl.value.trim());
+    await loadConfig({ force: true });
+    if (state.cfgError && /비밀번호/.test(state.cfgError)) ls.set('ts.password', '');
+    renderHome();
+  };
+  pwEl?.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitPw(); });
+  document.getElementById('pwok')?.addEventListener('click', submitPw);
+  const needName = () => {
+    if (nameEl.value.trim()) return false;
+    toast('조사자 이름을 먼저 적어 주세요.');
+    nameEl.focus();
+    return true;
+  };
+  document.getElementById('new').onclick = () => { if (!needName()) startNew(); };
+  document.getElementById('resurvey').onclick = () => { if (!needName()) renderResurvey(); };
+  $app.querySelectorAll('[data-open]').forEach((b) => { b.onclick = () => openDraft(b.dataset.open); });
+  $app.querySelectorAll('[data-del]').forEach((b) => {
+    b.onclick = async () => {
+      const d = await drafts.get(b.dataset.del);
+      if (!await confirmBox('조사 삭제', `<p><b>${esc(d.toilet.B0a || '(이름 없음)')}</b> 조사를 지울까요? 입력한 내용과 사진이 모두 사라집니다.</p>`, '지우기', '취소')) return;
+      for (const p of await photos.byDraft(d.localId)) await photos.remove(p.photoId);
+      await drafts.remove(d.localId);
+      renderHome();
+    };
+  });
+  document.getElementById('retry')?.addEventListener('click', async () => {
+    for (const d of (await drafts.all()).filter((x) => x.status === 'failed')) { d.status = 'queued'; await drafts.put(d); }
+    if (!navigator.onLine) toast('인터넷이 연결되면 자동으로 보냅니다.');
+    processQueue();
+    renderHome();
+  });
+  document.getElementById('clean')?.addEventListener('click', async () => {
+    const done = (await drafts.all()).filter((d) => d.status === 'done');
+    if (!done.length) { toast('정리할 완료 기록이 없습니다.'); return; }
+    if (!await confirmBox('완료된 기록 정리', `<p>전송이 끝난 ${done.length}건을 이 휴대폰에서 지울까요? 시트에 저장된 내용은 그대로 남습니다.</p>`, '정리', '취소')) return;
+    for (const d of done) {
+      for (const p of await photos.byDraft(d.localId)) await photos.remove(p.photoId);
+      await drafts.remove(d.localId);
+    }
+    renderHome();
+  });
+  document.getElementById('reload').onclick = async () => { await loadConfig({ force: true }); renderHome(); };
+  document.getElementById('resetpw').onclick = () => { ls.set('ts.password', ''); renderHome(); };
+}
+
+// ---------- 재조사 목록 ----------
+async function renderResurvey() {
+  state.view = 'resurvey';
+  $app.innerHTML = `<header class="bar"><button class="btn" id="back">← 처음으로</button><h1 class="bar-title">다시 조사할 화장실</h1></header>
+    <main class="home"><input id="q" class="text-input" placeholder="이름·주소·번호로 찾기" value="${esc(state.search)}">
+    <div id="list"><p class="hint">목록을 불러오는 중…</p></div></main>`;
+  document.getElementById('back').onclick = renderHome;
+  const listEl = document.getElementById('list');
+  const draw = () => {
+    const q = state.search.trim();
+    const rows = (state.toilets || []).filter((t) => !q || [t.id, t.name, t.address].some((s) => String(s).includes(q)));
+    listEl.innerHTML = rows.length ? rows.map((t) => `<button class="card pick" data-id="${esc(t.id)}">
+      <b>${esc(t.id)} · ${esc(t.name)}</b><div class="sub">${esc(t.address)} ${esc(t.floor)} · ${t.round}차 조사 ${esc(t.time)}</div></button>`).join('')
+      : '<p class="hint">찾는 화장실이 없습니다.</p>';
+    listEl.querySelectorAll('[data-id]').forEach((b) => { b.onclick = () => startResurvey(b.dataset.id); });
+  };
+  document.getElementById('q').addEventListener('input', (e) => { state.search = e.target.value; draw(); });
+  try {
+    state.toilets = (await call('listToilets')).toilets;
+    draw();
+  } catch (e) {
+    listEl.innerHTML = `<div class="alert">${esc(e.message)} — 재조사는 인터넷이 연결된 곳에서 시작해 주세요.</div>`;
+  }
+}
+
+async function startResurvey(id) {
+  let prev;
+  try { prev = await call('getToilet', { id }); } catch (e) { toast(e.message); return; }
+  const d = L.newDraft({ surveyor: ls.get('ts.surveyor'), resurveyOf: id });
+  L.prefillFromPrevious(state.cfg, d, prev);
+  d.prevRound = prev.round;
+  await begin(d);
+}
+
+// ---------- 조사 ----------
+async function startNew() {
+  await begin(L.newDraft({ surveyor: ls.get('ts.surveyor') }));
+}
+
+async function begin(d) {
+  await drafts.put(d);
+  state.draft = d;
+  captureLocation();
+  enterSurvey();
+}
+
+async function openDraft(id) {
+  state.draft = await drafts.get(id);
+  if (!state.draft) return renderHome();
+  enterSurvey();
+}
+
+function captureLocation() {
+  const d = state.draft;
+  if (!navigator.geolocation) { d.gpsError = '이 휴대폰은 위치를 지원하지 않습니다.'; return; }
+  d.gpsError = '위치를 찾는 중…';
+  const id = d.localId;
+  // 위치는 늦게 올 수 있다. 그 사이 조사를 다시 열었으면 지금 열린 것에, 아니면 저장된 최신본에 위치만 합친다.
+  const apply = async (fields) => {
+    if (state.draft?.localId === id) {
+      Object.assign(state.draft, fields);
+      saveSoon();
+      if (currentPage()?.type === 'start') renderPage();
+      return;
+    }
+    const latest = await drafts.get(id);
+    if (latest && latest.status === 'editing') { Object.assign(latest, fields); await drafts.put(latest); }
+  };
+  navigator.geolocation.getCurrentPosition((pos) => apply({
+    lat: +pos.coords.latitude.toFixed(6), lng: +pos.coords.longitude.toFixed(6),
+    gpsAccuracy: Math.round(pos.coords.accuracy), gpsError: '',
+  }), (err) => apply({
+    gpsError: err.code === 1 ? '위치 권한이 꺼져 있습니다. 휴대폰 설정에서 위치를 허용해 주세요.' : '위치를 찾지 못했습니다.',
+  }), { enableHighAccuracy: true, timeout: 20000, maximumAge: 60000 });
+}
+
+function enterSurvey() {
+  state.view = 'survey';
+  history.pushState({ survey: true }, '');
+  refreshPages();
+  if (!state.draft.pageId || !state.pages.some((p) => p.id === state.draft.pageId)) state.draft.pageId = state.pages[0].id;
+  renderPage();
+}
+
+window.addEventListener('popstate', () => {
+  if (state.view !== 'survey') return;
+  const i = L.pageIndex(state.pages, state.draft.pageId);
+  if (i > 0) { history.pushState({ survey: true }, ''); goTo(i - 1, false); } else { saveNow().then(renderHome); }
+});
+
+function refreshPages() { state.pages = L.buildPages(state.cfg, state.draft); }
+const currentPage = () => state.pages.find((p) => p.id === state.draft?.pageId);
+
+async function goTo(i, check = true) {
+  const d = state.draft;
+  const cur = currentPage();
+  if (check && cur && i > L.pageIndex(state.pages, cur.id)) {
+    const missing = L.missingOnPage(state.cfg, d, cur);
+    const warns = numberWarningsOnPage(cur);
+    if (missing.length || warns.length) {
+      const body = `${missing.length ? `<p><b>비어 있는 필수 항목</b></p><ul>${missing.map((m) => `<li>${esc(m.question)}</li>`).join('')}</ul>` : ''}
+        ${warns.length ? `<p><b>확인이 필요한 숫자</b></p><ul>${warns.map((w) => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
+        <p>나중에 채워도 됩니다.</p>`;
+      const go = await modal('확인해 주세요', body, [{ label: '돌아가서 입력', value: false }, { label: '그래도 다음으로', value: true, primary: true }]);
+      if (!go) return;
+    }
+  }
+  refreshPages();
+  const target = state.pages[Math.max(0, Math.min(state.pages.length - 1, i))];
+  d.pageId = target.id;
+  await saveNow();
+  renderPage();
+  window.scrollTo(0, 0);
+}
+
+function numberWarningsOnPage(page) {
+  if (page.type !== 'items') return [];
+  const out = [];
+  for (const code of page.codes) {
+    const it = state.cfg.byCode[code];
+    if (!['숫자', '정수'].includes(it.type) || !L.isVisible(state.cfg, state.draft, page.ctx, code)) continue;
+    const w = L.numberWarning(it, L.getRaw(state.draft, page.ctx, code));
+    if (w) out.push(`${it.question}: ${w}`);
+  }
+  return out;
+}
+
+async function renderPage() {
+  const d = state.draft;
+  refreshPages();
+  let page = currentPage();
+  if (!page) { d.pageId = state.pages[0].id; page = state.pages[0]; }
+  const i = L.pageIndex(state.pages, page.id);
+  const total = state.pages.length;
+  const pct = Math.round((i / (total - 1)) * 100);
+  const draftPhotos = await photos.byDraft(d.localId);
+
+  let body = '';
+  if (page.type === 'start') body = startHtml();
+  else if (page.type === 'presence') body = presenceHtml();
+  else if (page.type === 'review') body = reviewHtml(draftPhotos);
+  else {
+    // H 종합 요약 화면이면 자동 제안을 채운다
+    let sug = L.suggestH(state.cfg, d);
+    if (page.codes.some((c) => c in sug)) { sug = L.applySuggestions(state.cfg, d); saveSoon(); } else sug = {};
+    body = page.codes.filter((code) => L.isVisible(state.cfg, d, page.ctx, code))
+      .map((code) => itemHtml(state.cfg.byCode[code], page.ctx, draftPhotos, sug[code])).join('')
+      || '<p class="hint">이 화면은 앞의 답에 따라 모두 건너뜁니다. "다음"을 눌러 주세요.</p>';
+  }
+
+  $app.innerHTML = `
+  <header class="bar">
+    <div class="bar-row">
+      <button class="btn nav" id="prev" ${i === 0 ? 'disabled' : ''}>← 이전</button>
+      <div class="progress" aria-label="진행률 ${pct}%"><div class="progress-text">${i + 1} / ${total}</div><div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div></div>
+      ${page.type === 'review' ? '<span class="nav-spacer"></span>' : '<button class="btn nav primary" id="next">다음 →</button>'}
+    </div>
+    ${page.spaceLabel ? `<div class="space-banner">${esc(page.spaceLabel)}</div>` : ''}
+  </header>
+  <main class="page">
+    <h1 class="page-title">${esc(page.title)}</h1>
+    ${body}
+    <div class="bottom-nav">
+      <button class="btn nav" id="prev2" ${i === 0 ? 'disabled' : ''}>← 이전</button>
+      ${page.type === 'review' ? '' : '<button class="btn nav primary" id="next2">다음 →</button>'}
+    </div>
+    <button class="btn link" id="home">처음 화면으로 (저장됨)</button>
+  </main>`;
+
+  for (const id of ['prev', 'prev2']) document.getElementById(id)?.addEventListener('click', () => goTo(i - 1));
+  for (const id of ['next', 'next2']) document.getElementById(id)?.addEventListener('click', () => goTo(i + 1));
+  document.getElementById('home').onclick = async () => { await saveNow(); renderHome(); };
+  bindPage(page);
+}
+
+function startHtml() {
+  const d = state.draft;
+  const gps = d.lat != null ? `위도 ${d.lat}, 경도 ${d.lng}${d.gpsAccuracy ? ` (오차 약 ${d.gpsAccuracy}m)` : ''}` : (d.gpsError || '위치 없음');
+  return `<div class="card">
+    <p class="big-text">조사자: <b>${esc(d.surveyor)}</b></p>
+    ${d.resurveyOf ? `<p class="big-text">재조사: <b>${esc(d.resurveyOf)}</b> (이전 ${d.prevRound || ''}차 조사 값이 미리 채워져 있습니다. 하나씩 확인하고 바뀐 것만 고쳐 주세요.)</p>` : ''}
+    <p class="big-text">현재 위치: ${esc(gps)}</p>
+    <button class="btn" id="gps">위치 다시 잡기</button>
+    <p class="hint">화장실 입구 앞에서 위치를 잡으면 좋습니다.</p></div>
+    <div class="card"><p>답을 누르면 바로 휴대폰에 저장됩니다. 앱을 닫아도 처음 화면의 "이어서 하기"에서 계속할 수 있습니다.</p>
+    <p>어느 질문에서든 <b>📷 사진</b> 버튼으로 사진을 찍을 수 있습니다.</p></div>`;
+}
+
+function presenceHtml() {
+  const d = state.draft;
+  const q = (key, label) => `<div class="item"><div class="q">${label}</div>
+    <div class="choices two">${[[true, '있음'], [false, '없음']].map(([v, t]) => `<button class="choice ${d[key] === v ? 'on' : ''}" data-presence="${key}" data-v="${v}" aria-pressed="${d[key] === v}">${t}</button>`).join('')}</div></div>`;
+  return `<p class="hint">없다고 하면 그쪽 질문은 건너뛰고 '해당 없음(NA)'으로 저장합니다.</p>${q('hasMale', '남자화장실 있음?')}${q('hasFemale', '여자화장실 있음?')}`;
+}
+
+function photoStrip(list) {
+  if (!list.length) return '';
+  return `<div class="thumbs">${list.map((p) => `<span class="thumb"><img alt="사진" data-blob="${p.photoId}"><button class="thumb-del" data-delphoto="${p.photoId}" aria-label="사진 지우기">×</button></span>`).join('')}</div>`;
+}
+
+function itemHtml(it, ctx, draftPhotos, sug) {
+  const d = state.draft;
+  const raw = L.getRaw(d, ctx, it.code);
+  const key = `${ctx}:${it.code}`;
+  const fid = `f-${ctx}-${it.code}`.replace(/[^A-Za-z0-9_-]/g, '_');
+  const prefilled = d.prefilled[key] && !d.touched[key];
+  const suggested = ctx === L.TOILET && d.suggested[it.code] !== undefined && !d.touched[key] && raw === d.suggested[it.code];
+  const myPhotos = draftPhotos.filter((p) => p.itemCode === it.code && (p.spaceKey || L.TOILET) === ctx);
+  let input = '';
+  if (it.type === '선택(하나)') {
+    const opts = state.cfg.choices[it.list] || [];
+    input = `<div class="choices ${opts.length <= 2 ? 'two' : ''}">${opts.map((o) => `<button class="choice ${raw === o.value ? 'on' : ''}" data-choice="${esc(o.value)}" aria-pressed="${raw === o.value}">${esc(o.label)}</button>`).join('')}</div>`;
+    if (!opts.length) input = `<div class="alert">선택지 목록 "${esc(it.list)}"이(가) 선택지 탭에 없습니다.</div>`;
+  } else {
+    const isNA = raw === 'NA';
+    const common = `id="${fid}" data-input ${isNA ? 'disabled' : ''}`;
+    if (it.type === '숫자' || it.type === '정수') {
+      input = `<div class="num-row"><input ${common} class="text-input num" type="text" inputmode="numeric" pattern="[0-9]*" value="${isNA ? '' : esc(raw)}" placeholder="숫자">${it.unit ? `<span class="unit">${esc(it.unit)}</span>` : ''}</div>`;
+    } else if (it.type === '시각') {
+      input = `<input ${common} class="text-input" type="time" value="${isNA ? '' : esc(raw)}">`;
+    } else {
+      input = `<textarea ${common} class="text-input" rows="${it.question.length > 12 ? 2 : 1}">${isNA ? '' : esc(raw)}</textarea>`;
+    }
+    input += `<button class="btn small na ${isNA ? 'on' : ''}" data-na aria-pressed="${isNA}">해당 없음</button>`;
+  }
+  return `<div class="item ${it.required ? 'req' : ''}" data-code="${esc(it.code)}" data-ctx="${esc(ctx)}">
+    <div class="q"><label for="${fid}">${esc(it.question)}</label>${it.required ? ' <span class="req-mark">필수</span>' : ''}${prefilled ? ' <span class="tag">이전 조사 값</span>' : ''}</div>
+    ${it.how ? `<div class="how">${esc(it.how)}</div>` : ''}
+    ${input}
+    <div class="feedback">${feedbackHtml(it, raw)}</div>
+    ${sug ? `<div class="suggest ${suggested ? 'on' : ''}">${suggested ? '<b>자동 제안</b> — 맞는지 확인하고, 다르면 고쳐 주세요. ' : ''}${esc(sug.reason)}</div>` : ''}
+    <div class="photo-row"><label class="btn small camera">📷 사진<input type="file" accept="image/*" capture="environment" data-photo hidden></label>${photoStrip(myPhotos)}</div>
+  </div>`;
+}
+
+function feedbackHtml(it, raw) {
+  if (!['숫자', '정수'].includes(it.type)) return '';
+  const w = L.numberWarning(it, raw);
+  const badges = L.criteriaBadges(it, raw).map((b) => `<span class="badge ${b.ok ? 'ok' : 'no'}">${b.name} ${b.ok ? '충족' : '미달'} <small>(${esc(b.range)})</small></span>`).join('');
+  return `${badges}${w ? `<div class="warn">${esc(w)}</div>` : ''}`;
+}
+
+function reviewHtml(draftPhotos) {
+  const d = state.draft;
+  const missing = L.missingAll(state.cfg, d);
+  const invalid = L.invalidAll(state.cfg, d);
+  const warns = state.pages.flatMap((p) => numberWarningsOnPage(p).map((w) => ({ w, p })));
+  const spaces = L.multiSpaces(d);
+  return `<div class="card">
+      <p class="big-text"><b>${esc(d.toilet.B0a || '(이름 없음)')}</b> ${d.resurveyOf ? `· 재조사 ${esc(d.resurveyOf)}` : ''}</p>
+      <p>장애인 화장실 ${spaces.length}칸${spaces.length ? ` (${spaces.map((s) => esc(s.label)).join(', ')})` : ''}<br>
+      남자화장실 ${d.hasMale === false ? '없음' : d.hasMale ? '있음' : '미입력'} · 여자화장실 ${d.hasFemale === false ? '없음' : d.hasFemale ? '있음' : '미입력'}<br>
+      사진 ${draftPhotos.length}장 · 위치 ${d.lat != null ? '있음' : '없음'}</p></div>
+    ${missing.length ? `<div class="card warnbox"><h2>비어 있는 필수 항목 ${missing.length}개</h2>
+      ${missing.map((m) => `<button class="btn list-btn" data-goto="${esc(m.pageId)}">${m.spaceLabel ? `[${esc(m.spaceLabel)}] ` : ''}${esc(m.question)}</button>`).join('')}</div>`
+      : '<div class="card okbox">필수 항목을 모두 입력했습니다.</div>'}
+    ${invalid.length ? `<div class="alert"><h2>꼭 고쳐야 하는 숫자 ${invalid.length}개</h2><p>숫자 칸에 글자나 소수점이 있으면 제출할 수 없습니다.</p>
+      ${invalid.map((m) => `<button class="btn list-btn" data-goto="${esc(m.pageId)}">${m.spaceLabel ? `[${esc(m.spaceLabel)}] ` : ''}${esc(m.question)}</button>`).join('')}</div>` : ''}
+    ${warns.length ? `<div class="card warnbox"><h2>확인이 필요한 숫자 ${warns.length}개</h2>
+      ${warns.map(({ w, p }) => `<button class="btn list-btn" data-goto="${esc(p.id)}">${p.spaceLabel ? `[${esc(p.spaceLabel)}] ` : ''}${esc(w)}</button>`).join('')}</div>` : ''}
+    <button class="btn primary big" id="submit">제출하기</button>
+    <p class="hint">제출하면 전송 대기열에 들어가고, 인터넷이 연결되면 자동으로 보냅니다. 제출한 뒤에는 고칠 수 없습니다.</p>`;
+}
+
+function markTouched(ctx, code) {
+  const key = `${ctx}:${code}`;
+  state.draft.touched[key] = true;
+  if (ctx === L.TOILET) delete state.draft.suggested[code];
+}
+
+function bindPage(page) {
+  const d = state.draft;
+  if (page.type === 'start') {
+    document.getElementById('gps').onclick = () => { captureLocation(); renderPage(); };
+  }
+  if (page.type === 'presence') {
+    $app.querySelectorAll('[data-presence]').forEach((b) => {
+      b.onclick = () => {
+        const k = b.dataset.presence;
+        const v = b.dataset.v === 'true';
+        d[k] = d[k] === v ? null : v;
+        saveSoon(); renderPage();
+      };
+    });
+  }
+  if (page.type === 'review') {
+    $app.querySelectorAll('[data-goto]').forEach((b) => {
+      b.onclick = () => { const i = L.pageIndex(state.pages, b.dataset.goto); goTo(i, false); };
+    });
+    document.getElementById('submit').onclick = submit;
+  }
+  $app.querySelectorAll('.item[data-code]').forEach((el) => {
+    const ctx = el.dataset.ctx;
+    const code = el.dataset.code;
+    const it = state.cfg.byCode[code];
+    el.querySelectorAll('[data-choice]').forEach((b) => {
+      b.onclick = () => {
+        const v = b.dataset.choice;
+        L.setRaw(d, ctx, code, L.getRaw(d, ctx, code) === v ? '' : v);
+        markTouched(ctx, code); saveSoon(); keepScroll(renderPage);
+      };
+    });
+    const input = el.querySelector('[data-input]');
+    if (input) {
+      input.addEventListener('input', () => {
+        L.setRaw(d, ctx, code, input.value);
+        markTouched(ctx, code); saveSoon();
+        el.querySelector('.feedback').innerHTML = feedbackHtml(it, input.value);
+        el.querySelector('.tag')?.remove();
+      });
+      // 숫자는 뒤 항목 건너뛰기에 영향을 줄 수 있어 입력을 마치면 화면을 다시 그린다
+      if (it.type === '숫자' || it.type === '정수') input.addEventListener('change', () => keepScroll(renderPage));
+    }
+    el.querySelector('[data-na]')?.addEventListener('click', () => {
+      L.setRaw(d, ctx, code, L.getRaw(d, ctx, code) === 'NA' ? '' : 'NA');
+      markTouched(ctx, code); saveSoon(); keepScroll(renderPage);
+    });
+    el.querySelector('[data-photo]')?.addEventListener('change', async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      try {
+        const blob = await resizePhoto(file);
+        const info = L.spaceInfo(d, ctx);
+        await photos.put({
+          photoId: `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, localId: d.localId,
+          spaceKey: ctx === L.TOILET ? '' : ctx, itemCode: code, takenAt: nowText(), status: 'pending',
+          description: `${info?.label ? `${info.label} · ` : ''}${it.question}`,
+        }, blob);
+        toast('사진을 저장했습니다.');
+        keepScroll(renderPage);
+      } catch (err) { toast(err.message); }
+    });
+  });
+  const imgs = $app.querySelectorAll('img[data-blob]');
+  if (imgs.length) {
+    imgs.forEach((img) => photos.blob(img.dataset.blob).then((blob) => {
+      if (blob) { img.src = URL.createObjectURL(blob); img.onload = () => URL.revokeObjectURL(img.src); }
+    }));
+  }
+  $app.querySelectorAll('[data-delphoto]').forEach((b) => {
+    b.onclick = async () => {
+      if (!await confirmBox('사진 지우기', '<p>이 사진을 지울까요?</p>', '지우기', '취소')) return;
+      await photos.remove(b.dataset.delphoto);
+      keepScroll(renderPage);
+    };
+  });
+}
+
+async function keepScroll(fn) {
+  const y = window.scrollY;
+  await fn();
+  window.scrollTo(0, y);
+}
+
+async function submit() {
+  const d = state.draft;
+  if (L.invalidAll(state.cfg, d).length) {
+    await modal('제출할 수 없습니다', '<p>"꼭 고쳐야 하는 숫자"를 먼저 고쳐 주세요. 길이는 cm 정수(소수점 없이)로 적습니다.</p>', [{ label: '확인', value: true, primary: true }]);
+    return;
+  }
+  const missing = L.missingAll(state.cfg, d);
+  const { payload, spaceKeys } = L.buildSubmission(state.cfg, d, nowText());
+  // 장애인 화장실 개수를 줄여 없어진 칸의 사진은 올리지 않는다
+  const orphan = (await photos.byDraft(d.localId)).filter((p) => p.spaceKey && !spaceKeys.includes(p.spaceKey));
+  const ok = await confirmBox('제출할까요?', `${missing.length ? `<p>비어 있는 필수 항목이 <b>${missing.length}개</b> 있습니다. 비어 있는 채로 제출하면 '조사 안 함'으로 저장됩니다.</p>` : ''}
+    ${orphan.length ? `<p>지금은 없는 칸에서 찍은 사진 ${orphan.length}장은 올리지 않고 지웁니다.</p>` : ''}<p>제출한 뒤에는 고칠 수 없습니다.</p>`, '제출', '취소');
+  if (!ok) return;
+  for (const p of orphan) await photos.remove(p.photoId);
+  delete payload.password;
+  Object.assign(d, { submission: payload, spaceKeys, status: 'queued', queuedAt: Date.now(), error: '' });
+  await drafts.put(d);
+  toast(navigator.onLine ? '제출했습니다. 보내는 중입니다.' : '제출했습니다. 인터넷이 연결되면 자동으로 보냅니다.');
+  processQueue();
+  renderHome();
+}
+
+// ---------- 시작 ----------
+async function main() {
+  requestPersistence();
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').then((r) => r.update()).catch(() => {});
+  onSyncChange(() => { if (state.view === 'home') renderHome(); });
+  window.addEventListener('online', () => { if (state.view === 'home') { loadConfig().then(renderHome); } });
+  window.addEventListener('offline', () => { if (state.view === 'home') renderHome(); });
+  await loadConfig();
+  await renderHome();
+  startSync();
+}
+
+main().catch((e) => { $app.innerHTML = `<div class="alert">앱을 시작하지 못했습니다: ${esc(e.message)}</div>`; });
+
