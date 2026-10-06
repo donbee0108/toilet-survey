@@ -247,10 +247,62 @@ async function startResurvey(id) {
   await begin(d);
 }
 
+// ---------- 함께 조사: 다른 기기가 제출한 값 불러오기 ----------
+const FRESH_EVERY_MS = 30000;
+
+let freshBusy = false;
+const FRESH_AUTO_TIMEOUT_MS = 5000; // 자동 불러오기는 짧게 기다리고 포기
+
+async function pullFresh({ manual }) {
+  const d = state.draft;
+  if (!d || d.mode !== 'supplement' || d.status !== 'editing') return;
+  if (!navigator.onLine) { if (manual) toast('인터넷이 연결되면 불러올 수 있습니다.'); return; }
+  if (freshBusy) { if (manual) toast('불러오는 중입니다.'); return; }
+  freshBusy = true;
+  const btn = document.getElementById('fresh');
+  if (btn) btn.disabled = true;
+  let prev;
+  try {
+    prev = await call('getToilet', { id: d.serverId }, manual ? {} : { timeoutMs: FRESH_AUTO_TIMEOUT_MS });
+  } catch (e) {
+    d.freshAt = Date.now(); // 실패해도 30초 동안은 다시 시도하지 않음
+    if (manual) toast(e.message);
+    return;
+  } finally {
+    freshBusy = false;
+    if (btn && btn.isConnected) btn.disabled = false;
+  }
+  // 그사이 다른 조사를 열었거나 제출했으면 그만둠
+  if (state.draft !== d || d.status !== 'editing') return;
+  const pageBefore = d.pageId;
+  const res = L.mergeFresh(state.cfg, d, prev);
+  if (!res.ok) {
+    d.freshAt = Date.now();
+    if (manual || !d.freshWarned) { d.freshWarned = true; toast(res.reason + ' 이 보완은 제출해도 저장되지 않을 수 있습니다.'); }
+    return;
+  }
+  await saveNow();
+  if (res.conflicts.length) {
+    const label = (c) => {
+      const it = state.cfg.byCode[c.code];
+      const name = (v) => (it.list ? (state.cfg.choices[it.list] || []).filter((o) => String(v).split(',').includes(o.value)).map((o) => o.label).join(', ') || v : v);
+      const sp = L.spaceInfo(d, c.ctx);
+      const theirs = c.theirs === 'NA' ? '건너뜀(해당 없음)' : name(c.theirs);
+      return `<li>${sp?.label ? `[${esc(sp.label)}] ` : ''}${esc(it.question)}: 내 답 <b>${esc(name(c.mine))}</b> / 먼저 들어간 값 <b>${esc(theirs)}</b></li>`;
+    };
+    await modal('다른 사람이 먼저 채운 칸', `<p>같은 칸을 다른 기기에서 먼저 제출했습니다. 시트에는 먼저 들어간 값이 남습니다.</p><ul>${res.conflicts.map(label).join('')}</ul><p>값이 다르면 함께 조사한 분과 확인해 주세요.</p>`,
+      [{ label: '확인', value: true, primary: true }]);
+  } else if (manual || res.added) {
+    toast(res.added ? `다른 기기에서 채운 칸 ${res.added}개를 불러왔습니다.` : '새로 채워진 칸이 없습니다.');
+  }
+  // 화면을 다시 그린다: 직접 눌렀거나, 새로 불러온 칸이 있을 때만 (입력 중인 화면을 괜히 흔들지 않게)
+  if (state.view === 'survey' && state.draft === d && d.pageId === pageBefore && (manual || res.added || res.conflicts.length)) keepScroll(renderPage);
+}
+
 async function startSupplementFromServer(id) {
   let prev;
   try { prev = await call('getToilet', { id }); } catch (e) { toast(e.message); return; }
-  await beginSupplement(prev);
+  await beginSupplement(prev, { fromServer: true });
 }
 
 async function startSupplementFromLocal(localId) {
@@ -260,16 +312,17 @@ async function startSupplementFromLocal(localId) {
   if (navigator.onLine) {
     try {
       const prev = await call('getToilet', { id: d0.serverId });
-      if (Number(prev.round) === Number(d0.round)) { await beginSupplement(prev); return; }
+      if (Number(prev.round) === Number(d0.round)) { await beginSupplement(prev, { fromServer: true }); return; }
     } catch { /* 아래 기기 기록으로 */ }
   }
   toast('인터넷이 없어 휴대폰에 남은 기록으로 시작합니다. 이미 채워진 칸은 시트에서 그대로 둡니다.');
   await beginSupplement(L.rowsFromSubmitted(d0));
 }
 
-async function beginSupplement(rows) {
+async function beginSupplement(rows, { fromServer = false } = {}) {
   if (!(Number(rows.round) >= 1)) { toast('이 화장실의 조사차수를 알 수 없어 보완할 수 없습니다. 관리자에게 알려 주세요.'); return; }
   const d = L.supplementFromRows(state.cfg, L.newDraft({ surveyor: ls.get('ts.surveyor') }), rows);
+  if (fromServer) d.freshAt = Date.now(); // 방금 시트에서 불러왔으니 바로 다시 불러오지 않음
   await drafts.put(d);
   state.draft = d;
   enterSurvey(); // 보완은 위치를 다시 잡지 않는다
@@ -354,6 +407,8 @@ async function goTo(i, check = true) {
   await saveNow();
   renderPage();
   window.scrollTo(0, 0);
+  // 함께 조사: 화면을 넘긴 뒤 뒤에서 다른 기기 값을 불러온다 (신호가 약해도 화면 이동은 기다리지 않음)
+  if (d.mode === 'supplement' && navigator.onLine && Date.now() - (d.freshAt || 0) > FRESH_EVERY_MS) pullFresh({ manual: false });
 }
 
 function numberWarningsOnPage(page) {
@@ -402,7 +457,9 @@ async function renderPage() {
       <button class="progress" id="toc" aria-label="목차 열기, 진행률 ${pct}%"><div class="progress-text">${i + 1} / ${total} · 목차 ☰</div><div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div></button>
       ${page.type === 'review' ? '<span class="nav-spacer"></span>' : '<button class="btn nav primary" id="next">다음 →</button>'}
     </div>
-    ${d.mode === 'supplement' ? `<div class="mode-banner">보완 중 · ${esc(d.serverId)} ${d.round}차 — 빈칸만 채울 수 있습니다</div>` : ''}
+    ${d.mode === 'supplement' ? `<div class="mode-banner">보완 중 · ${esc(d.serverId)} ${d.round}차 — 빈칸만 채울 수 있습니다
+      <button class="btn small" id="fresh">🔄 다른 기기 값 불러오기</button>
+      <div class="sub">${d.freshAt ? `시트 값 확인: ${dateText(d.freshAt).slice(11)}` : ''}</div></div>` : ''}
     ${page.spaceLabel ? `<div class="space-banner">${esc(page.spaceLabel)}</div>` : ''}
   </header>
   <main class="page">
@@ -419,6 +476,7 @@ async function renderPage() {
   for (const id of ['next', 'next2']) document.getElementById(id)?.addEventListener('click', () => goTo(i + 1));
   document.getElementById('home').onclick = async () => { await saveNow(); renderHome(); };
   document.getElementById('toc').onclick = openToc;
+  document.getElementById('fresh')?.addEventListener('click', () => pullFresh({ manual: true }));
   bindPage(page);
 }
 

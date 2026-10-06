@@ -10,11 +10,11 @@ export function password() {
   try { return localStorage.getItem('ts.password') || ''; } catch { return ''; }
 }
 
-export async function call(action, body = {}) {
+export async function call(action, body = {}, { timeoutMs } = {}) {
   const url = apiUrl();
   if (!url || url.includes('여기에')) throw new Error('config.js에 웹앱 주소(API_URL)가 설정되지 않았습니다.');
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), action === 'uploadPhoto' ? PHOTO_TIMEOUT_MS : TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs || (action === 'uploadPhoto' ? PHOTO_TIMEOUT_MS : TIMEOUT_MS));
   let res;
   try {
     res = await fetch(url, {

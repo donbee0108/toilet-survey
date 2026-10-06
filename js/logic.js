@@ -509,6 +509,50 @@ export function supplementFromRows(cfg, draft, prev) {
 
 export const isLocked = (draft, ctx, code) => !!draft.locked?.[`${ctx}:${code}`];
 
+/**
+ * 함께 조사: 보완 중에 시트의 최신 값을 다시 불러와 합친다(다른 기기가 그사이 제출한 칸).
+ * - 시트에 새로 채워진 칸은 그 값으로 바꾸고 잠근다.
+ * - 내가 입력한 칸은 그대로 둔다. 같은 칸을 시트가 이미 다른 값으로 채웠으면 '겹친 칸'으로 알려 준다
+ *   (제출해도 시트에 먼저 들어간 값이 남는다).
+ * 반환: { ok, added, conflicts: [{ctx, code, mine, theirs}] } — 조사차수가 달라졌으면 ok=false.
+ */
+export function mergeFresh(cfg, draft, prev) {
+  if (Number(prev.round) !== Number(draft.round) || prev.id !== draft.serverId) {
+    return { ok: false, reason: '시트의 최신 조사차수가 달라졌습니다(그사이 재조사됨).' };
+  }
+  const fresh = supplementFromRows(cfg, newDraft(), prev);
+  // 내가 입력한 값 = 잠기지 않은 칸 중 비어 있지 않은 것
+  const mine = [];
+  const collect = (ctx, values) => {
+    for (const [code, v] of Object.entries(values || {})) {
+      if (!blank(v) && !draft.locked?.[`${ctx}:${code}`]) mine.push({ ctx, code, v });
+    }
+  };
+  collect(TOILET, draft.toilet);
+  for (const [key, sp] of Object.entries(draft.spaces || {})) collect(key, sp.values);
+
+  const before = new Set(Object.keys(draft.locked || {}));
+  const conflicts = [];
+  for (const { ctx, code, v } of mine) {
+    const key = `${ctx}:${code}`;
+    if (fresh.locked[key]) {
+      const theirs = getRaw(fresh, ctx, code);
+      // 숫자는 2.5 와 '2.50' 처럼 쓰는 모양만 다를 수 있어 값으로 비교
+      const same = String(normalize(cfg.byCode[code], theirs)) === String(normalize(cfg.byCode[code], v));
+      if (!same) conflicts.push({ ctx, code, mine: v, theirs });
+    } else {
+      setRaw(fresh, ctx, code, v);
+    }
+  }
+  const added = Object.keys(fresh.locked).filter((k) => !before.has(k)).length;
+  Object.assign(draft, {
+    toilet: fresh.toilet, spaces: fresh.spaces, locked: fresh.locked, orig: fresh.orig,
+    replaceable: fresh.replaceable, hasMale: fresh.hasMale, hasFemale: fresh.hasFemale, spaceIds: fresh.spaceIds,
+    freshAt: Date.now(),
+  });
+  return { ok: true, added, conflicts };
+}
+
 /** 보완 제출용: 시트 값과 달라진(새로 채운) 칸만 보낸다 (docs/API.md supplement) */
 export function buildSupplementPayload(cfg, draft, nowText) {
   const changed = (ctx, it) => {

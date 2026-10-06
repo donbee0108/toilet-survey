@@ -1,7 +1,7 @@
 // 오프라인용: 앱 파일을 휴대폰에 저장해 두고, 인터넷이 없어도 앱이 열리게 한다.
 // ★ 앱 파일(config.js 포함)을 고쳐 올릴 때는 반드시 VERSION을 하나 올린다 (v1 → v2).
 //   VERSION이 바뀌어야 휴대폰이 새 파일 전체를 한 번에 받아 바꾼다. 파일이 섞여 앱이 깨지는 일을 막기 위함.
-const VERSION = 'v3';
+const VERSION = 'v4';
 const CACHE = `toilet-survey-${VERSION}`;
 const FILES = [
   './', './index.html', './styles.css', './config.js', './manifest.webmanifest',
