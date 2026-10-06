@@ -226,6 +226,36 @@ export function missingAll(cfg, draft) {
   return buildPages(cfg, draft).flatMap((p) => missingOnPage(cfg, draft, p).map((m) => ({ ...m, pageId: p.id, pageTitle: p.title, spaceLabel: p.spaceLabel || '' })));
 }
 
+export const MULTI = '선택(여러 개)';
+// 이 저장값은 '단독 보기' — 다른 보기와 함께 고르면 확인이 필요하다
+const SOLO_VALUES = new Set(['NONE', 'UNKNOWN', 'NA']);
+export const splitMulti = (raw) => (blank(raw) ? [] : String(raw).split(',').map((x) => x.trim()).filter(Boolean));
+
+/** 여러 개 답을 고른 순서와 상관없이 선택지 순서대로 이어 붙인다 */
+export function joinMulti(cfg, item, values) {
+  const order = (cfg.choices[item.list] || []).map((c) => c.value);
+  return [...new Set(values)].sort((a, b) => order.indexOf(a) - order.indexOf(b)).join(',');
+}
+
+/** 여러 개 답에서 '없음·알 수 없음' 같은 단독 보기를 다른 보기와 함께 골랐으면 경고 문구 */
+export function multiWarning(cfg, item, raw) {
+  if (item.type !== MULTI) return '';
+  const vals = splitMulti(raw);
+  const solo = vals.filter((v) => SOLO_VALUES.has(v));
+  if (!solo.length || vals.length < 2) return '';
+  const label = (v) => (cfg.choices[item.list] || []).find((c) => c.value === v)?.label || v;
+  return `'${solo.map(label).join("', '")}'와(과) 다른 답을 함께 골랐습니다. 맞는지 확인해 주세요.`;
+}
+
+/** 확인이 필요한 답(여러 개 답의 충돌) 목록 — 막지는 않는다 */
+export function answerWarningsAll(cfg, draft) {
+  return buildPages(cfg, draft).filter((p) => p.type === 'items').flatMap((p) => p.codes
+    .filter((code) => isVisible(cfg, draft, p.ctx, code))
+    .map((code) => ({ code, w: multiWarning(cfg, cfg.byCode[code], getRaw(draft, p.ctx, code)) }))
+    .filter((x) => x.w)
+    .map((x) => ({ ...x, ctx: p.ctx, question: cfg.byCode[x.code].question, pageId: p.id, spaceLabel: p.spaceLabel || '' })));
+}
+
 /** 숫자 값 이상 여부 → 경고 문구 또는 '' */
 export function numberWarning(item, raw) {
   if (blank(raw) || raw === 'NA') return '';
@@ -289,20 +319,27 @@ export function suggestH(cfg, draft) {
   const multis = multiSpaces(draft);
   const out = {};
 
-  const accessOk = fv(TOILET, 'A3a') === 'N' || fv(TOILET, 'A4') === 'Y';
+  // 가는 길: 계단·턱 칸 수(숫자)면 0칸이어야, 예전 판(있음/없음)이면 '없음' 또는 경사로 '있음'
+  const a3 = cfg.byCode.A3a;
+  const numericA3 = a3 && (a3.type === '정수' || a3.type === '숫자');
+  const accessOk = numericA3 ? num(fv(TOILET, 'A3a')) === 0 : (fv(TOILET, 'A3a') === 'N' || fv(TOILET, 'A4') === 'Y');
+  // 칸 안 조건: 있는 항목만. 치수는 '법 최소' 이상, 변기 앞 공간이 선택형이면 '있음'
+  const sizeCodes = ['C7', 'C10a', 'C10b', 'C11'].filter((c) => cfg.byCode[c] && ['숫자', '정수'].includes(cfg.byCode[c].type));
+  const frontChoice = cfg.byCode.C12b && cfg.byCode.C12b.type === '선택(하나)';
   const wheel = (sp) => {
-    const need = ['C4', 'C7', 'C10a', 'C10b', 'C11'];
+    const need = ['C4', ...sizeCodes, ...(frontChoice ? ['C12b'] : [])];
     const values = Object.fromEntries(need.map((c) => [c, fv(sp.key, c)]));
     const known = need.every((c) => !blank(values[c]));
     const ge = (c) => num(values[c]) != null && (t(c) == null || num(values[c]) >= t(c));
-    const ok = values.C4 === 'OK' && ge('C7') && ge('C10a') && ge('C10b') && ge('C11') && accessOk;
+    const ok = values.C4 === 'OK' && sizeCodes.every(ge) && (!frontChoice || values.C12b === 'Y') && accessOk;
     return { ok, known };
   };
   if (cfg.byCode.H1a) {
     const res = multis.map((sp) => ({ sp, ...wheel(sp) }));
     const hit = res.filter((r) => r.ok);
     const accessKnown = !blank(fv(TOILET, 'A3a'));
-    const std = `(이용 가능, 문 폭 ${t('C7')}·바닥 ${t('C10a')}×${t('C10b')}·변기 옆 ${t('C11')}cm 이상, 턱 없음 또는 경사로)`;
+    const sizeText = sizeCodes.map((c) => `${cfg.byCode[c].question} ${t(c) ?? ''}`.trim()).join('·');
+    const std = `(지금 쓸 수 있음${sizeText ? `, ${sizeText}cm 이상` : ''}${frontChoice ? ', 변기 앞 빈 공간 충분' : ''}, ${numericA3 ? '가는 길 계단·턱 0칸' : '턱 없음 또는 경사로'})`;
     if (hit.length) out.H1a = { value: 'Y', reason: `조건을 모두 만족: ${hit.map((r) => r.sp.label).join(', ')} ${std}` };
     else if (!multis.length) out.H1a = { value: 'N', reason: '장애인 화장실이 없습니다.' };
     else if (res.every((r) => r.known) && accessKnown) out.H1a = { value: 'N', reason: `조건을 모두 만족하는 장애인 화장실이 없습니다 ${std}` };
@@ -325,11 +362,13 @@ export function suggestH(cfg, draft) {
       : { value: v, reason: `${src}(${cfg.byCode[src]?.question}) 답을 따랐습니다.` };
   }
   if (cfg.byCode.H4) {
-    const f6 = fv(TOILET, 'F6');
-    const f7 = fv(TOILET, 'F7');
-    if (f6 === 'Y' || f7 === 'TEXT') out.H4 = { value: 'Y', reason: f6 === 'Y' ? "'호출됨' 불빛이 있습니다(F6)." : '문자·화상으로 소통할 수 있습니다(F7).' };
-    else if (!blank(f6) && !blank(f7)) out.H4 = { value: 'N', reason: "'호출됨' 불빛도, 문자·화상 소통도 없습니다(F6·F7)." };
-    else out.H4 = { value: null, reason: 'F6·F7 답이 없어 제안하지 못했습니다.' };
+    const hasF6 = !!cfg.byCode.F6;
+    const f6 = hasF6 ? fv(TOILET, 'F6') : '';
+    const f7 = splitMulti(fv(TOILET, 'F7'));
+    const f7Known = f7.length && !f7.includes('UNKNOWN') && !f7.includes('NA');
+    if (f6 === 'Y' || f7.includes('TEXT')) out.H4 = { value: 'Y', reason: f6 === 'Y' ? "'호출됨' 불빛이 있습니다." : '비상벨을 누른 뒤 문자·화상으로 소통할 수 있습니다.' };
+    else if (f7Known && (!hasF6 || !blank(f6))) out.H4 = { value: 'N', reason: '비상벨을 누른 뒤 문자·화상으로 소통할 방법이 없습니다.' };
+    else out.H4 = { value: null, reason: "'비상벨 누른 뒤 소통할 방법' 답이 없거나 '알 수 없음'이라 제안하지 못했습니다." };
   }
   return out;
 }

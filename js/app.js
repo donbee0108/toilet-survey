@@ -342,7 +342,7 @@ async function goTo(i, check = true) {
     const warns = numberWarningsOnPage(cur);
     if (missing.length || warns.length) {
       const body = `${missing.length ? `<p><b>비어 있는 필수 항목</b></p><ul>${missing.map((m) => `<li>${esc(m.question)}</li>`).join('')}</ul>` : ''}
-        ${warns.length ? `<p><b>확인이 필요한 숫자</b></p><ul>${warns.map((w) => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
+        ${warns.length ? `<p><b>확인이 필요한 답</b></p><ul>${warns.map((w) => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
         <p>나중에 채워도 됩니다.</p>`;
       const go = await modal('확인해 주세요', body, [{ label: '돌아가서 입력', value: false }, { label: '그래도 다음으로', value: true, primary: true }]);
       if (!go) return;
@@ -361,6 +361,8 @@ function numberWarningsOnPage(page) {
   const out = [];
   for (const code of page.codes) {
     const it = state.cfg.byCode[code];
+    const mw = L.isVisible(state.cfg, state.draft, page.ctx, code) ? L.multiWarning(state.cfg, it, L.getRaw(state.draft, page.ctx, code)) : '';
+    if (mw) { out.push(`${it.question}: ${mw}`); continue; }
     if (!['숫자', '정수'].includes(it.type) || L.isLocked(state.draft, page.ctx, code) || !L.isVisible(state.cfg, state.draft, page.ctx, code)) continue;
     const w = L.numberWarning(it, L.getRaw(state.draft, page.ctx, code));
     if (w) out.push(`${it.question}: ${w}`);
@@ -494,7 +496,12 @@ function itemHtml(it, ctx, draftPhotos, sug) {
   const locked = L.isLocked(d, ctx, it.code);
   if (locked) sug = null;
   let input = '';
-  if (it.type === '선택(하나)') {
+  if (it.type === L.MULTI) {
+    const opts = state.cfg.choices[it.list] || [];
+    const sel = L.splitMulti(raw);
+    input = `<div class="hint">여러 개 고를 수 있습니다.</div><div class="choices multi ${locked ? 'locked' : ''}">${opts.map((o) => `<button class="choice ${sel.includes(o.value) ? 'on' : ''}" data-multi="${esc(o.value)}" aria-pressed="${sel.includes(o.value)}" ${locked ? 'disabled' : ''}>${esc(o.label)}</button>`).join('')}</div>`;
+    if (!opts.length) input = `<div class="alert">선택지 목록 "${esc(it.list)}"이(가) 선택지 탭에 없습니다.</div>`;
+  } else if (it.type === '선택(하나)') {
     const opts = state.cfg.choices[it.list] || [];
     input = `<div class="choices ${opts.length <= 2 ? 'two' : ''} ${locked ? 'locked' : ''}">${opts.map((o) => `<button class="choice ${raw === o.value ? 'on' : ''}" data-choice="${esc(o.value)}" aria-pressed="${raw === o.value}" ${locked ? 'disabled' : ''}>${esc(o.label)}</button>`).join('')}</div>`;
     if (!opts.length) input = `<div class="alert">선택지 목록 "${esc(it.list)}"이(가) 선택지 탭에 없습니다.</div>`;
@@ -509,13 +516,13 @@ function itemHtml(it, ctx, draftPhotos, sug) {
       input = `<textarea ${common} class="text-input" rows="${it.question.length > 12 ? 2 : 1}">${isNA ? '' : esc(raw)}</textarea>`;
     }
     if (locked) input += isNA ? '<div class="sub">해당 없음(NA)</div>' : '';
-    else input += `<button class="btn small na ${isNA ? 'on' : ''}" data-na aria-pressed="${isNA}">해당 없음</button>`;
+    else if (it.naButton !== false || isNA) input += `<button class="btn small na ${isNA ? 'on' : ''}" data-na aria-pressed="${isNA}">해당 없음</button>`;
   }
   return `<div class="item ${it.required ? 'req' : ''} ${locked ? 'is-locked' : ''}" data-code="${esc(it.code)}" data-ctx="${esc(ctx)}">
     <div class="q"><label for="${fid}">${esc(it.question)}</label>${it.required ? ' <span class="req-mark">필수</span>' : ''}${prefilled ? ' <span class="tag">이전 조사 값</span>' : ''}${locked ? ' <span class="tag saved">저장됨</span>' : ''}</div>
     ${it.how ? `<div class="how">${esc(it.how)}</div>` : ''}
     ${input}
-    <div class="feedback">${feedbackHtml(it, raw)}</div>
+    <div class="feedback">${feedbackHtml(it, raw)}${L.multiWarning(state.cfg, it, raw) ? `<div class="warn">${esc(L.multiWarning(state.cfg, it, raw))}</div>` : ''}</div>
     ${sug ? `<div class="suggest ${suggested ? 'on' : ''}">${suggested ? '<b>자동 제안</b> — 맞는지 확인하고, 다르면 고쳐 주세요. ' : ''}${!suggested && sug.value != null && blank(raw) ? `<b>제안: ${esc(choiceLabel(it, sug.value))}</b> — 맞으면 직접 눌러 주세요. ` : ''}${esc(sug.reason)}</div>` : ''}
     <div class="photo-row"><label class="btn small camera">📷 사진<input type="file" accept="image/*" capture="environment" data-photo hidden></label>${photoStrip(myPhotos)}</div>
   </div>`;
@@ -548,7 +555,7 @@ function reviewHtml(draftPhotos) {
       : '<div class="card okbox">필수 항목을 모두 입력했습니다.</div>'}
     ${invalid.length ? `<div class="alert"><h2>꼭 고쳐야 하는 숫자 ${invalid.length}개</h2><p>숫자 칸에 글자나 소수점이 있으면 제출할 수 없습니다.</p>
       ${invalid.map((m) => `<button class="btn list-btn" data-goto="${esc(m.pageId)}">${m.spaceLabel ? `[${esc(m.spaceLabel)}] ` : ''}${esc(m.question)}</button>`).join('')}</div>` : ''}
-    ${warns.length ? `<div class="card warnbox"><h2>확인이 필요한 숫자 ${warns.length}개</h2>
+    ${warns.length ? `<div class="card warnbox"><h2>확인이 필요한 답 ${warns.length}개</h2>
       ${warns.map(({ w, p }) => `<button class="btn list-btn" data-goto="${esc(p.id)}">${p.spaceLabel ? `[${esc(p.spaceLabel)}] ` : ''}${esc(w)}</button>`).join('')}</div>` : ''}
     ${d.mode === 'supplement'
     ? `<div class="card"><p class="big-text">새로 채운 칸 <b>${L.buildSupplementPayload(state.cfg, d, '').count}개</b> · 새 사진 ${draftPhotos.length}장</p></div>
@@ -589,6 +596,15 @@ function bindPage(page) {
     const ctx = el.dataset.ctx;
     const code = el.dataset.code;
     const it = state.cfg.byCode[code];
+    el.querySelectorAll('[data-multi]').forEach((b) => {
+      b.onclick = () => {
+        const v = b.dataset.multi;
+        const cur = L.splitMulti(L.getRaw(d, ctx, code));
+        const next = cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v];
+        L.setRaw(d, ctx, code, L.joinMulti(state.cfg, it, next));
+        markTouched(ctx, code); saveSoon(); keepScroll(renderPage);
+      };
+    });
     el.querySelectorAll('[data-choice]').forEach((b) => {
       b.onclick = () => {
         const v = b.dataset.choice;

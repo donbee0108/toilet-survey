@@ -30,12 +30,15 @@ export function parseSkip(text) {
 
 const isBlank = (v) => v === undefined || v === null || v === '';
 
+// '선택(여러 개)' 답은 쉼표로 이어 저장한다(예: 'MALE,ACCESSIBLE'). 조건은 '그 값이 들어 있는가'로 본다.
+const has = (refValue, value) => String(refValue).split(',').map((x) => x.trim()).includes(value);
+
 /** 규칙과 앞 항목의 답으로 건너뛸지 판단. 해석 실패한 규칙은 건너뛰지 않는다(질문을 보여 줌). */
 export function shouldSkip(rule, refValue) {
   if (!rule || rule.error) return false;
   switch (rule.op) {
-    case 'neq': return isBlank(refValue) || String(refValue) !== rule.value;
-    case 'eq': return !isBlank(refValue) && String(refValue) === rule.value;
+    case 'neq': return isBlank(refValue) || !has(refValue, rule.value);
+    case 'eq': return !isBlank(refValue) && has(refValue, rule.value);
     case 'lt': {
       if (isBlank(refValue) || refValue === 'NA') return true;
       const n = Number(refValue);
