@@ -667,6 +667,31 @@ export function assignmentsByTeam(items, date, lastTeam) {
     .map(([team, list]) => ({ team, list }));
 }
 
+/** 배정에 나오는 모든 조 (숫자는 번호순, 글자는 뒤에) */
+export function assignmentTeams(items) {
+  const num = (t) => (/^\d+$/.test(t) ? Number(t) : Infinity);
+  return [...new Set(items.map((a) => a.team).filter(Boolean))]
+    .sort((x, y) => (num(x) - num(y)) || String(x).localeCompare(String(y)));
+}
+
+/** 달력 한 달: 'YYYY-MM' → 7칸씩 채운 배열, 빈칸은 null, 날짜는 'YYYY-MM-DD' */
+export function monthGrid(ym) {
+  const [y, m] = ym.split('-').map(Number);
+  const first = new Date(y, m - 1, 1).getDay();
+  const days = new Date(y, m, 0).getDate();
+  const cells = Array(first).fill(null);
+  for (let d = 1; d <= days; d++) cells.push(`${ym}-${String(d).padStart(2, '0')}`);
+  while (cells.length % 7) cells.push(null);
+  return cells;
+}
+
+/** 'YYYY-MM'에서 n달 이동 */
+export function shiftMonth(ym, n) {
+  const [y, m] = ym.split('-').map(Number);
+  const d = new Date(y, m - 1 + n, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
 /** 배정 항목 상태: 이 휴대폰의 조사 기록 + 서버의 제출 기록 */
 export function assignmentStatus(a, localDrafts) {
   const mine = localDrafts.filter((d) => d.assignId === a.id && d.mode !== 'supplement');

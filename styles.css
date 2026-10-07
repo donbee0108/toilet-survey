@@ -161,6 +161,18 @@ button.progress { border: 2px solid var(--line); border-radius: var(--radius); b
 .team-chip { text-align: center; min-height: 56px; }
 .team-chip small { font-weight: 600; }
 
+.cal { margin: 4px 0 8px; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.cal-dow { text-align: center; font-weight: 700; font-size: 16px; padding: 2px 0; }
+.cal-dow:first-child { color: #c00; }
+.cal-day { min-height: 54px; padding: 2px; border: 1px solid #bbb; border-radius: 8px; background: #fff; color: #111; font: inherit; font-size: 18px; display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1.1; }
+.cal-day small { font-size: 13px; font-weight: 700; }
+.cal-day.has { background: #ffe066; border-color: #111; font-weight: 800; }
+.cal-day.all-done { background: #c9f0c9; }
+.cal-day.today { border: 3px solid #111; }
+.cal-day.on { background: #1d4ed8; color: #fff; border-color: #1d4ed8; }
+.cal-legend { font-size: 15px; margin-top: 6px; }
+
 /* 확인 창, 알림 */
 .modal-wrap { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 20; }
 .modal { background: #fff; border-radius: 16px; padding: 20px; max-width: 560px; width: 100%; max-height: 85vh; overflow: auto; }

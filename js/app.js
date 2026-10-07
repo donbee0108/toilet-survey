@@ -113,7 +113,7 @@ const ASSIGN_TEXT = { todo: '조사 전', editing: '입력 중', queued: '제출
 const teamLabel = (t) => (/^\d+$/.test(String(t || '')) ? `${t}조` : String(t || ''));
 const currentTeam = () => ls.get('ts.lastTeam');
 
-/** 처음 화면: 날짜(◀ ▶) → 그날 활동하는 조 버튼 → 고른 조의 화장실 목록. 배정이 없으면 1~10조 버튼만 */
+/** 처음 화면: 조 버튼 → 그 조의 달력(배정된 날 표시, 오늘이 먼저 골라짐) → 고른 날의 화장실 목록. 배정이 없으면 1~10조 버튼만 */
 function teamHtml(allDrafts) {
   const items = state.assignments || [];
   const team = currentTeam();
@@ -124,30 +124,57 @@ function teamHtml(allDrafts) {
     return `<h2 class="sec">오늘 활동하는 조</h2>
       <div class="team-chips">${teams.map((t) => `<button class="choice team-chip ${t === team ? 'on' : ''}" data-team="${esc(t)}" aria-pressed="${t === team}">${esc(teamLabel(t))}</button>`).join('')}</div>`;
   }
-  const { dates, pick } = L.assignmentDates(items, todayText());
-  if (!state.assignDate || !dates.includes(state.assignDate)) state.assignDate = pick;
+  const today = todayText();
+  const teams = L.assignmentTeams(items);
+  if (team && !teams.includes(team)) teams.push(team);
+  const chips = `<h2 class="sec">오늘 활동하는 조</h2>
+    <div class="team-chips">${teams.map((t) => `<button class="choice team-chip ${t === team ? 'on' : ''}" data-team="${esc(t)}" aria-pressed="${t === team}">${esc(teamLabel(t))}</button>`).join('')}</div>`;
+  if (!team) return `${chips}<p class="hint">조를 누르면 그 조의 달력과 화장실 목록이 나옵니다.</p>`;
+
+  const teamItems = items.filter((a) => a.team === team);
+  // 조를 새로 고르면: 오늘 → 없으면 가장 가까운 다음 배정일 → 없으면 마지막 배정일
+  if (state.calTeam !== team || !state.assignDate) {
+    state.calTeam = team;
+    state.assignDate = L.assignmentDates(teamItems, today).pick;
+    state.calMonth = state.assignDate.slice(0, 7);
+  }
   const date = state.assignDate;
-  const i = dates.indexOf(date);
-  const groups = L.assignmentsByTeam(items, date, '');
-  const noToday = !dates.includes(todayText());
-  const mine = groups.find((g) => g.team === team);
-  return `<h2 class="sec">오늘 활동하는 조</h2>
-    <div class="date-nav">
-      <button class="btn nav" id="dprev" ${i <= 0 ? 'disabled' : ''} aria-label="이전 날짜">◀</button>
-      <div class="date-label">${esc(dateLabel(date))}</div>
-      <button class="btn nav" id="dnext" ${i >= dates.length - 1 ? 'disabled' : ''} aria-label="다음 날짜">▶</button>
-    </div>
-    ${noToday && date !== todayText() ? '<p class="hint">오늘 배정된 화장실은 없습니다. 가장 가까운 날짜를 보여 드립니다.</p>' : ''}
-    <div class="team-chips">${groups.map((g) => `<button class="choice team-chip ${g.team === team ? 'on' : ''}" data-team="${esc(g.team)}" aria-pressed="${g.team === team}">${esc(teamLabel(g.team))} <small>${g.list.length}곳</small></button>`).join('')}</div>
+  const ym = state.calMonth || date.slice(0, 7);
+  const byDate = new Map();
+  for (const a of teamItems) {
+    const s = byDate.get(a.date) || { n: 0, done: 0 };
+    s.n++;
+    if (L.assignmentStatus(a, allDrafts).kind === 'done') s.done++;
+    byDate.set(a.date, s);
+  }
+  const [cy, cm] = ym.split('-').map(Number);
+  const cal = `<div class="cal">
+      <div class="date-nav">
+        <button class="btn nav" id="mprev" aria-label="이전 달">◀</button>
+        <div class="date-label">${cy}년 ${cm}월</div>
+        <button class="btn nav" id="mnext" aria-label="다음 달">▶</button>
+      </div>
+      <div class="cal-grid">${DOW.map((w) => `<div class="cal-dow">${w}</div>`).join('')}
+      ${L.monthGrid(ym).map((d) => {
+        if (!d) return '<div></div>';
+        const s = byDate.get(d);
+        const cls = ['cal-day', s ? 'has' : '', s && s.done === s.n ? 'all-done' : '', d === today ? 'today' : '', d === date ? 'on' : ''].filter(Boolean).join(' ');
+        return `<button class="${cls}" data-day="${d}" aria-pressed="${d === date}" aria-label="${esc(dateLabel(d))}${s ? ` 배정 ${s.n}곳` : ''}"><span>${Number(d.slice(8))}</span>${s ? `<small>${s.done === s.n ? '✓' : `${s.n}곳`}</small>` : ''}</button>`;
+      }).join('')}</div>
+      <p class="hint cal-legend">노란 날 = ${esc(teamLabel(team))} 배정일 · 초록 ✓ = 모두 제출 · 굵은 테두리 = 오늘</p>
+    </div>`;
+  const list = teamItems.filter((a) => a.date === date);
+  const mine = list.length ? { list } : null;
+  return `${chips}${cal}
     ${mine ? `<div class="team-group">
-      <h3 class="team-title">${esc(teamLabel(team))} 화장실 목록 <span class="sub">${mine.list.length}곳</span></h3>
+      <h3 class="team-title">${esc(dateLabel(date))} ${esc(teamLabel(team))} 목록 <span class="sub">${mine.list.length}곳</span></h3>
       ${mine.list.map((a) => {
         const st = L.assignmentStatus(a, allDrafts);
         return `<button class="card pick assign" data-assign="${esc(a.id)}">
           <div class="row"><b class="grow">${esc(a.name)}</b><span class="status s-a-${st.kind}">${ASSIGN_TEXT[st.kind]}${st.tid ? ` ${esc(st.tid)}` : ''}</span></div>
           <div class="sub">${esc((a.road && a.road !== '-') ? a.road : (a.lot || ''))}${a.memo ? ` · ${esc(a.memo)}` : ''}</div></button>`;
       }).join('')}</div>`
-      : `<p class="hint">${team ? `${esc(teamLabel(team))}는 이 날짜에 배정된 화장실이 없습니다. ` : ''}오늘 활동하는 조를 눌러 주세요.</p>`}`;
+      : `<p class="hint">${esc(dateLabel(date))}에는 ${esc(teamLabel(team))}에 배정된 화장실이 없습니다. 달력에서 노란 날을 눌러 보세요.</p>`}`;
 }
 
 async function openAssignment(id) {
@@ -298,8 +325,9 @@ async function renderHome() {
   });
   document.getElementById('reload').onclick = async () => { await loadConfig({ force: true }); renderHome(); };
   document.getElementById('resetpw').onclick = () => { ls.set('ts.password', ''); state.needPw = true; renderHome(); };
-  document.getElementById('dprev')?.addEventListener('click', () => { const { dates } = L.assignmentDates(state.assignments, todayText()); state.assignDate = dates[Math.max(0, dates.indexOf(state.assignDate) - 1)]; renderHome(); });
-  document.getElementById('dnext')?.addEventListener('click', () => { const { dates } = L.assignmentDates(state.assignments, todayText()); state.assignDate = dates[Math.min(dates.length - 1, dates.indexOf(state.assignDate) + 1)]; renderHome(); });
+  document.getElementById('mprev')?.addEventListener('click', () => { state.calMonth = L.shiftMonth(state.calMonth, -1); renderHome(); });
+  document.getElementById('mnext')?.addEventListener('click', () => { state.calMonth = L.shiftMonth(state.calMonth, 1); renderHome(); });
+  $app.querySelectorAll('[data-day]').forEach((b) => { b.onclick = () => { state.assignDate = b.dataset.day; renderHome(); }; });
   $app.querySelectorAll('[data-assign]').forEach((b) => { b.onclick = () => { if (!needName()) openAssignment(b.dataset.assign); }; });
 }
 
