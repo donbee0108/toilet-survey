@@ -144,6 +144,9 @@ button.progress { border: 2px solid var(--line); border-radius: var(--radius); b
 .item.is-locked .choice:not(.on) { opacity: .45; }
 .item.is-locked .choice:disabled { cursor: default; }
 
+.card.welcome { background: #e6ecf7; border-color: var(--primary); }
+.card.welcome .big-text { margin: 0 0 4px; font-weight: 800; }
+
 /* 확인 창, 알림 */
 .modal-wrap { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 20; }
 .modal { background: #fff; border-radius: 16px; padding: 20px; max-width: 560px; width: 100%; max-height: 85vh; overflow: auto; }

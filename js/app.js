@@ -66,6 +66,7 @@ async function loadConfig({ force = false } = {}) {
   const cached = await kv.get('config');
   if (cached && !force) useConfig(cached.data, cached.fetchedAt, true);
   if (!navigator.onLine || !apiUrl()) return;
+  if (!ls.get('ts.password')) return; // 비밀번호를 넣기 전에는 서버에 묻지 않는다 (첫 화면에 경고가 뜨지 않게)
   try {
     const data = await call('config');
     await kv.set('config', { data, fetchedAt: Date.now() });
@@ -104,7 +105,10 @@ async function renderHome() {
     <div class="net ${navigator.onLine ? 'on' : 'off'}">${navigator.onLine ? '인터넷 연결됨' : '인터넷 끊김 — 입력은 계속할 수 있습니다'}</div></header>
   <main class="home">
     ${noUrl ? '<div class="alert">관리자 설정 필요: config.js에 웹앱 주소가 없습니다.</div>' : ''}
-    ${state.cfgError ? `<div class="alert">조사 항목을 불러오지 못했습니다: ${esc(state.cfgError)}</div>` : ''}
+    ${state.cfgError && !needsPw ? `<div class="alert">${/비밀번호/.test(state.cfgError)
+      ? '비밀번호가 바뀌었을 수 있습니다. 아래 "설정·정보 → 비밀번호 다시 입력"을 눌러 새 비밀번호를 넣어 주세요.'
+      : `조사 항목을 불러오지 못했습니다: ${esc(state.cfgError)}`}</div>` : ''}
+    ${needsPw ? '<div class="card welcome"><p class="big-text">조사자 이름과 비밀번호를 입력해 주세요.</p><p class="hint">비밀번호는 조사팀에서 안내받은 것을 넣고 "확인"을 누르면 됩니다. 처음 한 번만 넣으면 다음부터는 기억합니다.</p></div>' : ''}
     ${info?.problems?.length ? `<div class="alert">항목정의를 확인해 주세요 (관리자에게 알려 주세요): ${esc(info.problems.join(' / '))}</div>` : ''}
 
     <section class="card">
@@ -112,13 +116,14 @@ async function renderHome() {
       <input id="surveyor" class="text-input" autocomplete="name" value="${esc(ls.get('ts.surveyor'))}" placeholder="이름을 적어 주세요">
       ${needsPw ? `<label class="field-label" for="pw">조사팀 비밀번호</label>
       <div class="row"><input id="pw" class="text-input grow" type="password" autocomplete="current-password" placeholder="안내받은 비밀번호" enterkeyhint="done">
-      <button class="btn primary" id="pwok">확인</button></div>` : ''}
+      <button class="btn primary" id="pwok">확인</button></div>
+      ${state.pwWrong ? '<div class="warn">비밀번호가 맞지 않습니다. 다시 확인해 주세요.</div>' : ''}` : ''}
     </section>
 
     <button class="btn primary big" id="new" ${state.cfg ? '' : 'disabled'}>새 조사 시작</button>
     <button class="btn big" id="resurvey" ${state.cfg ? '' : 'disabled'}>이미 조사한 화장실 다시 조사</button>
     <button class="btn big" id="supplement" ${state.cfg ? '' : 'disabled'}>제출한 조사 보완 (빈칸 채우기)</button>
-    ${!state.cfg ? '<p class="hint">조사 항목을 불러와야 시작할 수 있습니다. 인터넷에 연결한 뒤 비밀번호를 넣고 아래 "조사 항목 새로 불러오기"를 눌러 주세요.</p>' : ''}
+    ${!state.cfg && !needsPw ? '<p class="hint">조사 항목을 불러와야 시작할 수 있습니다. 인터넷에 연결한 뒤 아래 "설정·정보 → 조사 항목 새로 불러오기"를 눌러 주세요.</p>' : ''}
 
     ${editing.length ? `<h2 class="sec">이어서 하기</h2>
       ${editing.map((d) => `<div class="card row">
@@ -159,7 +164,8 @@ async function renderHome() {
     if (!pwEl.value.trim()) { toast('비밀번호를 적어 주세요.'); return; }
     ls.set('ts.password', pwEl.value.trim());
     await loadConfig({ force: true });
-    if (state.cfgError && /비밀번호/.test(state.cfgError)) ls.set('ts.password', '');
+    state.pwWrong = !!(state.cfgError && /비밀번호/.test(state.cfgError));
+    if (state.pwWrong) { ls.set('ts.password', ''); state.cfgError = ''; }
     renderHome();
   };
   pwEl?.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitPw(); });
