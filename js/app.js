@@ -602,6 +602,7 @@ async function renderPage() {
   </header>
   <main class="page">
     <h1 class="page-title">${esc(page.title)}</h1>
+    ${copyFirstHtml(page)}
     ${body}
     <div class="bottom-nav">
       <button class="btn nav" id="prev2" ${i === 0 ? 'disabled' : ''}>← 이전</button>
@@ -615,7 +616,35 @@ async function renderPage() {
   document.getElementById('home').onclick = async () => { await saveNow(); renderHome(); };
   document.getElementById('toc').onclick = openToc;
   document.getElementById('fresh')?.addEventListener('click', () => pullFresh({ manual: true }));
+  document.getElementById('copyFirst')?.addEventListener('click', () => copyFromFirst(page));
   bindPage(page);
+}
+
+/** 장애인 화장실 둘째 칸부터: "첫 칸과 같게" 버튼 (이 화면 문항만) */
+function copyFirstHtml(page) {
+  if (page.type !== 'items') return '';
+  const d = state.draft;
+  const src = L.copySourceFor(d, page.ctx);
+  if (!src) return '';
+  const hasSrc = page.codes.some((c) => String(L.getRaw(d, src.key, c) ?? '') !== '');
+  return `<div class="copy-first">
+    <button class="btn" id="copyFirst" ${hasSrc ? '' : 'disabled'}>📋 첫 칸과 같게 채우기</button>
+    <div class="hint">${hasSrc ? `'${esc(src.label)}'의 이 화면 답을 그대로 넣습니다. 다른 것만 고쳐 주세요. 사진은 따로 찍어 주세요.` : `'${esc(src.label)}'의 이 화면을 먼저 채우면 쓸 수 있습니다.`}</div>
+  </div>`;
+}
+
+async function copyFromFirst(page) {
+  const d = state.draft;
+  const src = L.copySourceFor(d, page.ctx);
+  if (!src) return;
+  const { changed, overwritten } = L.copySpaceValues(d, src.key, page.ctx, page.codes, { dryRun: true });
+  if (!changed.length) { toast('이미 첫 칸과 같습니다.'); return; }
+  if (overwritten && !(await confirmBox('이미 적은 답이 있습니다', `<p>이 화면에서 이미 적은 답 ${overwritten}개도 첫 칸 값으로 바꿀까요?</p>`, '바꾸기', '취소'))) return;
+  const res = L.copySpaceValues(d, src.key, page.ctx, page.codes);
+  for (const code of res.changed) markTouched(page.ctx, code);
+  saveSoon();
+  toast(`${res.changed.length}개 문항을 첫 칸과 같게 넣었습니다.`);
+  keepScroll(renderPage);
 }
 
 /** 목차: 모든 화면을 공간별로 묶어 보여 주고, 누르면 그 화면으로 바로 간다 */

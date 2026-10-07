@@ -182,6 +182,10 @@ button.progress { border: 2px solid var(--line); border-radius: var(--radius); b
 
 .diag { white-space: pre-wrap; word-break: break-all; font-size: 13px; background: #f3f3f3; padding: 8px; border-radius: 8px; }
 
+.copy-first { margin: 0 0 14px; padding: 8px 10px; border: 2px dashed #1d4ed8; border-radius: 12px; background: #eef3ff; }
+.copy-first .btn { width: 100%; min-height: 52px; font-size: 20px; }
+.copy-first .hint { font-size: 15px; margin: 6px 0 0; }
+
 /* 확인 창, 알림 */
 .modal-wrap { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 20; }
 .modal { background: #fff; border-radius: 16px; padding: 20px; max-width: 560px; width: 100%; max-height: 85vh; overflow: auto; }

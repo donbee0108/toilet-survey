@@ -531,6 +531,33 @@ export function supplementFromRows(cfg, draft, prev) {
 
 export const isLocked = (draft, ctx, code) => !!draft.locked?.[`${ctx}:${code}`];
 
+/** 장애인 화장실 둘째 칸부터: 값을 복사해 올 첫 칸. 첫 칸이거나 장애인 칸이 아니면 null */
+export function copySourceFor(draft, ctx) {
+  const list = multiSpaces(draft);
+  return list.findIndex((s) => s.key === ctx) > 0 ? list[0] : null;
+}
+
+/**
+ * codes(한 화면의 문항)에 대해 src 칸의 값을 ctx 칸에 넣는다.
+ * 첫 칸이 비어 있는 문항과 잠긴(저장됨) 칸은 그대로 둔다. dryRun이면 세기만 한다.
+ * 사진은 칸마다 따로라 복사하지 않는다.
+ */
+export function copySpaceValues(draft, srcKey, ctx, codes, { dryRun = false } = {}) {
+  const changed = [];
+  let overwritten = 0;
+  for (const code of codes) {
+    if (isLocked(draft, ctx, code)) continue;
+    const v = getRaw(draft, srcKey, code);
+    if (blank(v)) continue;
+    const cur = getRaw(draft, ctx, code);
+    if (cur === v) continue;
+    if (!blank(cur)) overwritten++;
+    changed.push(code);
+    if (!dryRun) setRaw(draft, ctx, code, v);
+  }
+  return { changed, overwritten };
+}
+
 /**
  * 함께 조사: 보완 중에 시트의 최신 값을 다시 불러와 합친다(다른 기기가 그사이 제출한 칸).
  * - 시트에 새로 채워진 칸은 그 값으로 바꾸고 잠근다.
