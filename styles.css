@@ -157,6 +157,10 @@ button.progress { border: 2px solid var(--line); border-radius: var(--radius); b
 .s-a-queued { color: #6a4a00; background: var(--warn-bg); }
 .s-a-done { color: var(--ok); background: var(--ok-bg); }
 
+.team-chips { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; margin: 8px 0 12px; }
+.team-chip { text-align: center; min-height: 56px; }
+.team-chip small { font-weight: 600; }
+
 /* 확인 창, 알림 */
 .modal-wrap { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 20; }
 .modal { background: #fff; border-radius: 16px; padding: 20px; max-width: 560px; width: 100%; max-height: 85vh; overflow: auto; }

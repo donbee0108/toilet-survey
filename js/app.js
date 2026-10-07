@@ -108,36 +108,49 @@ function dateLabel(s) {
 
 const ASSIGN_TEXT = { todo: '조사 전', editing: '입력 중', queued: '제출 대기', done: '제출됨' };
 
-function assignmentsHtml(allDrafts) {
+// 조: '3' → '3조', 글자는 그대로. 고른 조가 조사자로 기록된다.
+const teamLabel = (t) => (/^\d+$/.test(String(t || '')) ? `${t}조` : String(t || ''));
+const currentTeam = () => ls.get('ts.lastTeam');
+
+/** 처음 화면: 날짜(◀ ▶) → 그날 활동하는 조 버튼 → 고른 조의 화장실 목록. 배정이 없으면 1~10조 버튼만 */
+function teamHtml(allDrafts) {
   const items = state.assignments || [];
-  if (!items.length) return '';
+  const team = currentTeam();
+  if (!items.length) {
+    const teams = Array.from({ length: 10 }, (_, k) => String(k + 1));
+    if (team && !teams.includes(team)) teams.push(team);
+    return `<h2 class="sec">오늘 활동하는 조</h2>
+      <div class="team-chips">${teams.map((t) => `<button class="choice team-chip ${t === team ? 'on' : ''}" data-team="${esc(t)}" aria-pressed="${t === team}">${esc(teamLabel(t))}</button>`).join('')}</div>`;
+  }
   const { dates, pick } = L.assignmentDates(items, todayText());
   if (!state.assignDate || !dates.includes(state.assignDate)) state.assignDate = pick;
   const date = state.assignDate;
   const i = dates.indexOf(date);
-  const groups = L.assignmentsByTeam(items, date, ls.get('ts.lastTeam'));
+  const groups = L.assignmentsByTeam(items, date, '');
   const noToday = !dates.includes(todayText());
-  return `<h2 class="sec">배정된 화장실</h2>
+  const mine = groups.find((g) => g.team === team);
+  return `<h2 class="sec">오늘 활동하는 조</h2>
     <div class="date-nav">
       <button class="btn nav" id="dprev" ${i <= 0 ? 'disabled' : ''} aria-label="이전 날짜">◀</button>
       <div class="date-label">${esc(dateLabel(date))}</div>
       <button class="btn nav" id="dnext" ${i >= dates.length - 1 ? 'disabled' : ''} aria-label="다음 날짜">▶</button>
     </div>
     ${noToday && date !== todayText() ? '<p class="hint">오늘 배정된 화장실은 없습니다. 가장 가까운 날짜를 보여 드립니다.</p>' : ''}
-    ${groups.map((g) => `<div class="team-group">
-      <h3 class="team-title">${/^\d+$/.test(g.team) ? `${esc(g.team)}조` : esc(g.team)} <span class="sub">${g.list.length}곳</span></h3>
-      ${g.list.map((a) => {
+    <div class="team-chips">${groups.map((g) => `<button class="choice team-chip ${g.team === team ? 'on' : ''}" data-team="${esc(g.team)}" aria-pressed="${g.team === team}">${esc(teamLabel(g.team))} <small>${g.list.length}곳</small></button>`).join('')}</div>
+    ${mine ? `<div class="team-group">
+      <h3 class="team-title">${esc(teamLabel(team))} 화장실 목록 <span class="sub">${mine.list.length}곳</span></h3>
+      ${mine.list.map((a) => {
         const st = L.assignmentStatus(a, allDrafts);
         return `<button class="card pick assign" data-assign="${esc(a.id)}">
           <div class="row"><b class="grow">${esc(a.name)}</b><span class="status s-a-${st.kind}">${ASSIGN_TEXT[st.kind]}${st.tid ? ` ${esc(st.tid)}` : ''}</span></div>
           <div class="sub">${esc((a.road && a.road !== '-') ? a.road : (a.lot || ''))}${a.memo ? ` · ${esc(a.memo)}` : ''}</div></button>`;
-      }).join('')}</div>`).join('')}`;
+      }).join('')}</div>`
+      : `<p class="hint">${team ? `${esc(teamLabel(team))}는 이 날짜에 배정된 화장실이 없습니다. ` : ''}오늘 활동하는 조를 눌러 주세요.</p>`}`;
 }
 
 async function openAssignment(id) {
   const a = (state.assignments || []).find((x) => x.id === id);
   if (!a) return;
-  ls.set('ts.lastTeam', a.team);
   const st = L.assignmentStatus(a, await drafts.all());
   if (st.kind === 'editing') return openDraft(st.draft.localId);
   if (st.kind === 'queued') { toast('이 휴대폰에서 이미 제출해 전송을 기다리는 화장실입니다.'); return; }
@@ -148,7 +161,7 @@ async function openAssignment(id) {
     if (choice === 're') return startResurvey(st.tid, { assignId: a.id, assignTeam: a.team, assignDate: a.date });
     return;
   }
-  await begin(L.draftFromAssignment(a, { surveyor: ls.get('ts.surveyor') }));
+  await begin(L.draftFromAssignment(a, { surveyor: teamLabel(currentTeam()) }));
 }
 function useConfig(data, fetchedAt, fromCache) {
   state.cfg = L.prepareConfig(structuredClone(data));
@@ -183,19 +196,17 @@ async function renderHome() {
       ? '비밀번호가 바뀌었을 수 있습니다. 아래 "설정·정보 → 비밀번호 다시 입력"을 눌러 새 비밀번호를 넣어 주세요.'
       : `조사 항목을 불러오지 못했습니다: ${esc(state.cfgError)}`}</div>` : ''}
     ${needsPw ? '<div class="card welcome"><p class="big-text">조사자 이름과 비밀번호를 입력해 주세요.</p><p class="hint">비밀번호는 조사팀에서 안내받은 것을 넣고 "확인"을 누르면 됩니다. 처음 한 번만 넣으면 다음부터는 기억합니다.</p></div>'
-      : (!ls.get('ts.surveyor') ? '<div class="card welcome"><p class="big-text">조사자 이름을 입력해 주세요.</p><p class="hint">처음 한 번만 넣으면 다음부터는 기억합니다.</p></div>' : '')}
+      : (!currentTeam() ? '<div class="card welcome"><p class="big-text">오늘 활동하는 조를 눌러 주세요.</p><p class="hint">고른 조가 조사자로 기록됩니다. 다음에 열면 그 조가 선택돼 있고, 다른 조에 들어가는 날에는 버튼만 바꿔 누르면 됩니다.</p></div>' : '')}
     ${info?.problems?.length ? `<div class="alert">항목정의를 확인해 주세요 (관리자에게 알려 주세요): ${esc(info.problems.join(' / '))}</div>` : ''}
 
-    <section class="card">
-      <label class="field-label" for="surveyor">조사자 이름</label>
-      <input id="surveyor" class="text-input" autocomplete="name" value="${esc(ls.get('ts.surveyor'))}" placeholder="이름을 적어 주세요">
-      ${needsPw ? `<label class="field-label" for="pw">조사팀 비밀번호</label>
+    ${needsPw ? `<section class="card">
+      <label class="field-label" for="pw">조사팀 비밀번호</label>
       <div class="row"><input id="pw" class="text-input grow" type="password" autocomplete="current-password" placeholder="안내받은 비밀번호" enterkeyhint="done">
       <button class="btn primary" id="pwok">확인</button></div>
-      ${state.pwWrong ? '<div class="warn">비밀번호가 맞지 않습니다. 다시 확인해 주세요.</div>' : ''}` : ''}
-    </section>
+      ${state.pwWrong ? '<div class="warn">비밀번호가 맞지 않습니다. 다시 확인해 주세요.</div>' : ''}
+    </section>` : ''}
 
-    ${state.cfg ? assignmentsHtml(all) : ''}
+    ${state.cfg ? teamHtml(all) : ''}
     ${(state.assignments || []).length ? '<h2 class="sec">목록에 없는 화장실</h2>' : ''}
     <button class="btn primary big" id="new" ${state.cfg ? '' : 'disabled'}>새 조사 시작</button>
     <button class="btn big" id="resurvey" ${state.cfg ? '' : 'disabled'}>이미 조사한 화장실 다시 조사</button>
@@ -234,8 +245,6 @@ async function renderHome() {
     </details>
   </main>`;
 
-  const nameEl = document.getElementById('surveyor');
-  nameEl.addEventListener('input', () => ls.set('ts.surveyor', nameEl.value.trim()));
   const pwEl = document.getElementById('pw');
   const submitPw = async () => {
     if (!pwEl.value.trim()) { toast('비밀번호를 적어 주세요.'); return; }
@@ -247,12 +256,14 @@ async function renderHome() {
   };
   pwEl?.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitPw(); });
   document.getElementById('pwok')?.addEventListener('click', submitPw);
+  // 조를 먼저 골라야 시작할 수 있다 (고른 조가 조사자로 기록됨)
   const needName = () => {
-    if (nameEl.value.trim()) return false;
-    toast('조사자 이름을 먼저 적어 주세요.');
-    nameEl.focus();
+    if (currentTeam()) return false;
+    toast('먼저 오늘 활동하는 조를 눌러 주세요.');
+    document.querySelector('.team-chip')?.focus();
     return true;
   };
+  $app.querySelectorAll('[data-team]').forEach((b) => { b.onclick = () => { ls.set('ts.lastTeam', b.dataset.team); renderHome(); }; });
   document.getElementById('new').onclick = () => { if (!needName()) startNew(); };
   document.getElementById('resurvey').onclick = () => { if (!needName()) renderResurvey('resurvey'); };
   document.getElementById('supplement').onclick = () => { if (!needName()) renderResurvey('supplement'); };
@@ -327,7 +338,7 @@ async function renderResurvey(mode = 'resurvey') {
 async function startResurvey(id, extra = {}) {
   let prev;
   try { prev = await call('getToilet', { id }); } catch (e) { toast(e.message); return; }
-  const d = L.newDraft({ surveyor: ls.get('ts.surveyor'), resurveyOf: id });
+  const d = L.newDraft({ surveyor: teamLabel(currentTeam()), resurveyOf: id });
   L.prefillFromPrevious(state.cfg, d, prev);
   d.prevRound = prev.round;
   Object.assign(d, extra); // 배정 목록에서 다시 조사하면 배정번호를 이어서 저장
@@ -408,7 +419,7 @@ async function startSupplementFromLocal(localId) {
 
 async function beginSupplement(rows, { fromServer = false } = {}) {
   if (!(Number(rows.round) >= 1)) { toast('이 화장실의 조사차수를 알 수 없어 보완할 수 없습니다. 관리자에게 알려 주세요.'); return; }
-  const d = L.supplementFromRows(state.cfg, L.newDraft({ surveyor: ls.get('ts.surveyor') }), rows);
+  const d = L.supplementFromRows(state.cfg, L.newDraft({ surveyor: teamLabel(currentTeam()) }), rows);
   if (fromServer) d.freshAt = Date.now(); // 방금 시트에서 불러왔으니 바로 다시 불러오지 않음
   await drafts.put(d);
   state.draft = d;
@@ -417,7 +428,7 @@ async function beginSupplement(rows, { fromServer = false } = {}) {
 
 // ---------- 조사 ----------
 async function startNew() {
-  await begin(L.newDraft({ surveyor: ls.get('ts.surveyor') }));
+  await begin(L.newDraft({ surveyor: teamLabel(currentTeam()) }));
 }
 
 async function begin(d) {
@@ -601,7 +612,7 @@ function startHtml() {
   const d = state.draft;
   const gps = d.lat != null ? `위도 ${d.lat}, 경도 ${d.lng}${d.gpsAccuracy ? ` (오차 약 ${d.gpsAccuracy}m)` : ''}` : (d.gpsError || '위치 없음');
   return `<div class="card">
-    <p class="big-text">조사자: <b>${esc(d.surveyor)}</b></p>
+    <p class="big-text">조사한 조: <b>${esc(d.surveyor)}</b></p>
     ${d.resurveyOf ? `<p class="big-text">재조사: <b>${esc(d.resurveyOf)}</b> (이전 ${d.prevRound || ''}차 조사 값이 미리 채워져 있습니다. 하나씩 확인하고 바뀐 것만 고쳐 주세요.)</p>` : ''}
     ${d.mode === 'supplement' ? `<p class="big-text">보완: <b>${esc(d.serverId)} ${d.round}차</b> — ${esc(d.toilet.B0a || '')}</p>
       <p>이미 저장된 칸은 <b>"저장됨"</b>으로 잠겨 있고, <b>빈칸만</b> 채울 수 있습니다. 위의 "목차"를 누르면 빈칸이 있는 곳으로 바로 갈 수 있습니다.</p></div>`
