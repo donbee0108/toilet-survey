@@ -68,6 +68,7 @@ async function loadConfig({ force = false } = {}) {
   if (!navigator.onLine || !apiUrl()) { loadAssignments(); return; } // 인터넷이 없으면 저장된 배정 목록만
   try {
     const data = await call('config');
+    if (!Array.isArray(data.items)) throw new Error('서버에서 조사 항목을 받지 못했습니다. 잠시 뒤 다시 열어 주세요.');
     state.needPw = false;
     await kv.set('config', { data, fetchedAt: Date.now() });
     useConfig(data, Date.now(), false);
