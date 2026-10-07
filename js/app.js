@@ -248,7 +248,6 @@ async function renderHome() {
     ${state.cfg ? teamHtml(all) : ''}
     ${(state.assignments || []).length ? '<h2 class="sec">목록에 없는 화장실</h2>' : ''}
     <button class="btn primary big" id="new" ${state.cfg ? '' : 'disabled'}>새 조사 시작</button>
-    <button class="btn big" id="resurvey" ${state.cfg ? '' : 'disabled'}>이미 조사한 화장실 다시 조사</button>
     <button class="btn big" id="supplement" ${state.cfg ? '' : 'disabled'}>제출한 조사 보완 (빈칸 채우기)</button>
     ${!state.cfg && !needsPw ? '<p class="hint">조사 항목을 불러와야 시작할 수 있습니다. 인터넷에 연결한 뒤 아래 "설정·정보 → 조사 항목 새로 불러오기"를 눌러 주세요.</p>' : ''}
 
@@ -305,7 +304,6 @@ async function renderHome() {
   $app.querySelectorAll('[data-team]').forEach((b) => { b.onclick = () => { ls.set('ts.lastTeam', b.dataset.team); state.pickTeam = false; renderHome(); }; });
   document.getElementById('changeTeam')?.addEventListener('click', () => { state.pickTeam = true; renderHome(); });
   document.getElementById('new').onclick = () => { if (!needName()) startNew(); };
-  document.getElementById('resurvey').onclick = () => { if (!needName()) renderResurvey('resurvey'); };
   document.getElementById('supplement').onclick = () => { if (!needName()) renderResurvey('supplement'); };
   $app.querySelectorAll('[data-supp]').forEach((b) => { b.onclick = () => { if (!needName()) startSupplementFromLocal(b.dataset.supp); }; });
   $app.querySelectorAll('[data-open]').forEach((b) => { b.onclick = () => openDraft(b.dataset.open); });
@@ -355,7 +353,7 @@ async function renderResurvey(mode = 'resurvey') {
   state.view = 'resurvey';
   const supp = mode === 'supplement';
   $app.innerHTML = `<header class="bar"><button class="btn" id="back">← 처음으로</button><h1 class="bar-title">${supp ? '보완할 화장실' : '다시 조사할 화장실'}</h1></header>
-    <main class="home">${supp ? '<p class="hint">가장 최근 조사의 <b>빈칸만</b> 채울 수 있습니다. 이미 저장된 값을 고치려면 "다시 조사"를 쓰세요.</p>' : ''}
+    <main class="home">${supp ? '<p class="hint">제출된 화장실 목록입니다. 누르면 가장 최근 조사의 <b>빈칸만</b> 채울 수 있습니다. 이미 저장된 값을 고치려면 처음 화면 조 목록에서 그 화장실을 눌러 "다시 조사"를 고르세요.</p>' : ''}
     <input id="q" class="text-input" placeholder="이름·주소·번호로 찾기" value="${esc(state.search)}">
     <div id="list"><p class="hint">목록을 불러오는 중…</p></div></main>`;
   document.getElementById('back').onclick = renderHome;
