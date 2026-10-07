@@ -85,6 +85,13 @@ header.bar { position: sticky; top: 0; z-index: 5; background: #fff; border-bott
   max-width: 720px; margin: 8px auto 0; background: #ffe066; color: #111; border: 3px solid #111;
   border-radius: var(--radius); padding: 8px 12px; text-align: center; font-size: 24px; font-weight: 900;
 }
+.space-banner.sb-multi-male { background: #2563eb; color: #fff; }
+.space-banner.sb-multi-female { background: #f472b6; color: #111; }
+.space-banner.sb-multi-shared { background: #8b5cf6; color: #fff; }
+.space-banner.sb-male { background: #16a34a; color: #fff; }
+.space-banner.sb-female { background: #fb923c; color: #111; }
+.item.flash { animation: flash 1.6s ease-out; border-radius: 10px; }
+@keyframes flash { 0%, 40% { background: #fff3b0; box-shadow: 0 0 0 4px #f5b400; } 100% { background: transparent; box-shadow: none; } }
 .page-title { font-size: 24px; margin: 8px 0 14px; }
 .big-text { font-size: 21px; margin: 6px 0; }
 

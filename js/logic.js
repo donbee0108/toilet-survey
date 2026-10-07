@@ -309,6 +309,7 @@ export function headerProblems(cfg) {
 /** 법·BF·UD 기준 충족 표시 (값이 없는 기준은 표시하지 않음) */
 export function criteriaBadges(item, raw) {
   if (blank(raw) || raw === 'NA') return [];
+  if (item.noneButton && Number(raw) === 0) return []; // '없음'(0)은 충족·미달 표시 안 함
   const v = Number(String(raw).replace(/,/g, ''));
   if (!Number.isFinite(v)) return [];
   const out = [];

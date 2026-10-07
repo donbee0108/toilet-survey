@@ -525,7 +525,28 @@ window.addEventListener('popstate', () => {
 function refreshPages() { state.pages = L.buildPages(state.cfg, state.draft); }
 const currentPage = () => state.pages.find((p) => p.id === state.draft?.pageId);
 
-async function goTo(i, check = true) {
+/** 공간별 배너 색: 남자 장애인 파랑, 여자 장애인 분홍, 공용 장애인 보라, 남자 초록, 여자 주황 (그 밖은 노랑) */
+function bannerClass(ctx) {
+  if (ctx === L.MA) return 'sb-male';
+  if (ctx === L.FE) return 'sb-female';
+  const side = L.spaceInfo(state.draft, ctx)?.side;
+  return { MALE: 'sb-multi-male', FEMALE: 'sb-multi-female', SHARED: 'sb-multi-shared' }[side] || '';
+}
+
+/** 그 문항으로 스크롤하고 잠깐 강조한다 */
+function focusItem(ctx, code) {
+  const el = document.querySelector(`.item[data-code="${CSS.escape(code)}"][data-ctx="${CSS.escape(ctx)}"]`)
+    || (code.startsWith('_') ? document.querySelector(`[data-presence="${CSS.escape(code.slice(1))}"]`)?.closest('.card, section, div') : null);
+  if (!el) return false;
+  el.scrollIntoView({ block: 'center' });
+  el.classList.remove('flash');
+  void el.offsetWidth; // 다시 누를 때도 깜빡이도록
+  el.classList.add('flash');
+  el.querySelector('[data-input]:not([disabled])')?.focus({ preventScroll: true });
+  return true;
+}
+
+async function goTo(i, check = true, focus = null) {
   const d = state.draft;
   const cur = currentPage();
   if (check && cur && i > L.pageIndex(state.pages, cur.id)) {
@@ -536,15 +557,15 @@ async function goTo(i, check = true) {
         ${warns.length ? `<p><b>확인이 필요한 답</b></p><ul>${warns.map((w) => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
         <p>나중에 채워도 됩니다.</p>`;
       const go = await modal('확인해 주세요', body, [{ label: '돌아가서 입력', value: false }, { label: '그래도 다음으로', value: true, primary: true }]);
-      if (!go) return;
+      if (!go) { if (missing[0]) focusItem(missing[0].ctx, missing[0].code); return; }
     }
   }
   refreshPages();
   const target = state.pages[Math.max(0, Math.min(state.pages.length - 1, i))];
   d.pageId = target.id;
   await saveNow();
-  renderPage();
-  window.scrollTo(0, 0);
+  await renderPage();
+  if (!(focus && focusItem(focus.ctx, focus.code))) window.scrollTo(0, 0);
   // 함께 조사: 화면을 넘긴 뒤 뒤에서 다른 기기 값을 불러온다 (신호가 약해도 화면 이동은 기다리지 않음)
   if (d.mode === 'supplement' && navigator.onLine && Date.now() - (d.freshAt || 0) > FRESH_EVERY_MS) pullFresh({ manual: false });
 }
@@ -598,7 +619,7 @@ async function renderPage() {
     ${d.mode === 'supplement' ? `<div class="mode-banner">보완 중 · ${esc(d.serverId)} ${d.round}차 — 빈칸만 채울 수 있습니다
       <button class="btn small" id="fresh">🔄 다른 기기 값 불러오기</button>
       <div class="sub">${d.freshAt ? `시트 값 확인: ${dateText(d.freshAt).slice(11)}` : ''}</div></div>` : ''}
-    ${page.spaceLabel ? `<div class="space-banner">${esc(page.spaceLabel)}</div>` : ''}
+    ${page.spaceLabel ? `<div class="space-banner ${bannerClass(page.ctx)}">${esc(page.spaceLabel)}</div>` : ''}
   </header>
   <main class="page">
     <h1 class="page-title">${esc(page.title)}</h1>
@@ -741,6 +762,7 @@ function itemHtml(it, ctx, draftPhotos, sug) {
       input = `<textarea ${common} class="text-input" rows="${it.question.length > 12 ? 2 : 1}">${isNA ? '' : esc(raw)}</textarea>`;
     }
     if (locked) input += isNA ? '<div class="sub">해당 없음(NA)</div>' : '';
+    else if (it.noneButton && !isNA) input += `<button class="btn small na ${raw === '0' ? 'on' : ''}" data-none aria-pressed="${raw === '0'}">없음</button>`;
     else if (it.naButton !== false || isNA) input += `<button class="btn small na ${isNA ? 'on' : ''}" data-na aria-pressed="${isNA}">해당 없음</button>`;
   }
   return `<div class="item ${it.required ? 'req' : ''} ${locked ? 'is-locked' : ''}" data-code="${esc(it.code)}" data-ctx="${esc(ctx)}">
@@ -776,10 +798,10 @@ function reviewHtml(draftPhotos) {
       남자화장실 ${d.hasMale === false ? '없음' : d.hasMale ? '있음' : '미입력'} · 여자화장실 ${d.hasFemale === false ? '없음' : d.hasFemale ? '있음' : '미입력'}<br>
       사진 ${draftPhotos.length}장 · 위치 ${d.lat != null ? '있음' : '없음'}</p></div>
     ${missing.length ? `<div class="card warnbox"><h2>비어 있는 필수 항목 ${missing.length}개</h2>
-      ${missing.map((m) => `<button class="btn list-btn" data-goto="${esc(m.pageId)}">${m.spaceLabel ? `[${esc(m.spaceLabel)}] ` : ''}${esc(m.question)}</button>`).join('')}</div>`
+      ${missing.map((m) => `<button class="btn list-btn" data-goto="${esc(m.pageId)}" data-ctx="${esc(m.ctx)}" data-code="${esc(m.code)}">${m.spaceLabel ? `[${esc(m.spaceLabel)}] ` : ''}${esc(m.question)}</button>`).join('')}</div>`
       : '<div class="card okbox">필수 항목을 모두 입력했습니다.</div>'}
     ${invalid.length ? `<div class="alert"><h2>꼭 고쳐야 하는 숫자 ${invalid.length}개</h2><p>숫자 칸에 글자나 소수점이 있으면 제출할 수 없습니다.</p>
-      ${invalid.map((m) => `<button class="btn list-btn" data-goto="${esc(m.pageId)}">${m.spaceLabel ? `[${esc(m.spaceLabel)}] ` : ''}${esc(m.question)}</button>`).join('')}</div>` : ''}
+      ${invalid.map((m) => `<button class="btn list-btn" data-goto="${esc(m.pageId)}" data-ctx="${esc(m.ctx)}" data-code="${esc(m.code)}">${m.spaceLabel ? `[${esc(m.spaceLabel)}] ` : ''}${esc(m.question)}</button>`).join('')}</div>` : ''}
     ${warns.length ? `<div class="card warnbox"><h2>확인이 필요한 답 ${warns.length}개</h2>
       ${warns.map(({ w, p }) => `<button class="btn list-btn" data-goto="${esc(p.id)}">${p.spaceLabel ? `[${esc(p.spaceLabel)}] ` : ''}${esc(w)}</button>`).join('')}</div>` : ''}
     ${d.mode === 'supplement'
@@ -813,7 +835,7 @@ function bindPage(page) {
   }
   if (page.type === 'review') {
     $app.querySelectorAll('[data-goto]').forEach((b) => {
-      b.onclick = () => { const i = L.pageIndex(state.pages, b.dataset.goto); goTo(i, false); };
+      b.onclick = () => { const i = L.pageIndex(state.pages, b.dataset.goto); goTo(i, false, b.dataset.code ? { ctx: b.dataset.ctx, code: b.dataset.code } : null); };
     });
     document.getElementById('submit').onclick = submit;
   }
@@ -850,6 +872,11 @@ function bindPage(page) {
       // 숫자는 뒤 항목 건너뛰기에 영향을 줄 수 있어 입력을 마치면 화면을 다시 그린다
       if (it.type === '숫자' || it.type === '정수') input.addEventListener('change', () => keepScroll(renderPage));
     }
+    // '없음' = 0개
+    el.querySelector('[data-none]')?.addEventListener('click', () => {
+      L.setRaw(d, ctx, code, L.getRaw(d, ctx, code) === '0' ? '' : '0');
+      markTouched(ctx, code); saveSoon(); keepScroll(renderPage);
+    });
     el.querySelector('[data-na]')?.addEventListener('click', () => {
       L.setRaw(d, ctx, code, L.getRaw(d, ctx, code) === 'NA' ? '' : 'NA');
       markTouched(ctx, code); saveSoon(); keepScroll(renderPage);
