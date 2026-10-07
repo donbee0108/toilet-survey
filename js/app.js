@@ -64,7 +64,7 @@ const confirmBox = (title, body, yes = '예', no = '아니오') => modal(title, 
 // ---------- 설정 불러오기 ----------
 async function loadConfig({ force = false } = {}) {
   const cached = await kv.get('config');
-  if (cached && !force) useConfig(cached.data, cached.fetchedAt, true);
+  if (cached && !force && Array.isArray(cached.data?.items)) useConfig(cached.data, cached.fetchedAt, true);
   if (!navigator.onLine || !apiUrl()) { loadAssignments(); return; } // 인터넷이 없으면 저장된 배정 목록만
   try {
     const data = await call('config');
@@ -83,7 +83,7 @@ async function loadConfig({ force = false } = {}) {
 // ---------- 배정 목록 ----------
 async function loadAssignments() {
   const cached = await kv.get('assignments');
-  if (cached) { state.assignments = cached.items; state.assignmentsReady = true; }
+  if (Array.isArray(cached?.items)) { state.assignments = cached.items; state.assignmentsReady = true; }
   if (!navigator.onLine || !apiUrl()) { state.assignmentsReady = true; return; }
   try {
     const res = await call('assignments');
@@ -911,5 +911,18 @@ async function main() {
   startSync();
 }
 
-main().catch((e) => { $app.innerHTML = `<div class="alert">앱을 시작하지 못했습니다: ${esc(e.message)}</div>`; });
+// 시작 오류: 어디서 났는지(관리자용)와 다시 시도 버튼을 보여 준다. 조사 기록(drafts·사진)은 지우지 않는다.
+main().catch((e) => {
+  $app.innerHTML = `<div class="alert">앱을 시작하지 못했습니다: ${esc(e?.message || String(e))}</div>
+    <button class="btn primary big" id="retry">다시 시도</button>
+    <button class="btn big" id="softreset">조 선택·배정 목록을 지우고 다시 시도</button>
+    <p class="hint">조사하던 내용과 사진은 지워지지 않습니다. 그래도 안 되면 이 화면을 캡처해서 관리자에게 보내 주세요.</p>
+    <pre class="diag">${esc(String(e?.stack || '').split(/\r?\n/).slice(0, 8).join(' | '))}</pre>`;
+  document.getElementById('retry').onclick = () => location.reload();
+  document.getElementById('softreset').onclick = async () => {
+    ls.set('ts.lastTeam', '');
+    try { await kv.set('assignments', null); await kv.set('config', null); } catch { /* 무시 */ }
+    location.reload();
+  };
+});
 
