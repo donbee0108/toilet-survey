@@ -436,7 +436,7 @@ export function buildSubmission(cfg, draft, nowText) {
   return {
     payload: {
       action: 'submit', clientId: draft.localId, resurveyOf: draft.resurveyOf || null,
-      meta: { 입력시각: nowText, 조사자: draft.surveyor, 위도: draft.lat ?? '', 경도: draft.lng ?? '' },
+      meta: { 입력시각: nowText, 조사자: draft.surveyor, 위도: draft.lat ?? '', 경도: draft.lng ?? '', ...(draft.assignId ? { 배정번호: draft.assignId } : {}) },
       toilet, spaces,
     },
     spaceKeys,
@@ -631,6 +631,52 @@ export function pageStats(cfg, draft, page) {
   const visible = page.codes.filter((code) => isVisible(cfg, draft, page.ctx, code));
   const answered = visible.filter((code) => !blank(getRaw(draft, page.ctx, code))).length;
   return { total: visible.length, answered, missingRequired: missingOnPage(cfg, draft, page).length };
+}
+
+// ---------- 배정 목록 ----------
+/** 배정 목록에서 고른 화장실로 새 조사를 만든다: 이름·주소만 미리 채움 */
+export function draftFromAssignment(a, { surveyor = '' } = {}) {
+  const d = newDraft({ surveyor });
+  d.assignId = a.id;
+  d.assignTeam = a.team;
+  d.assignDate = a.date;
+  d.prefillLabel = '배정 목록 값';
+  const addr = (a.road && a.road !== '-') ? a.road : (a.lot || '');
+  if (a.name) { d.toilet.B0a = a.name; d.prefilled['t:B0a'] = true; }
+  if (addr) { d.toilet.B0b = addr; d.prefilled['t:B0b'] = true; }
+  return d;
+}
+
+/** 날짜 목록(정렬)과, 오늘 또는 가장 가까운 날짜 */
+export function assignmentDates(items, today) {
+  const dates = [...new Set(items.map((a) => a.date).filter(Boolean))].sort();
+  const pick = dates.includes(today) ? today : (dates.find((x) => x > today) || dates[dates.length - 1] || today);
+  return { dates, pick };
+}
+
+/** 그날의 배정을 조별로 묶음. lastTeam이 맨 앞, 나머지는 조 번호순 */
+export function assignmentsByTeam(items, date, lastTeam) {
+  const groups = new Map();
+  for (const a of items.filter((x) => x.date === date)) {
+    if (!groups.has(a.team)) groups.set(a.team, []);
+    groups.get(a.team).push(a);
+  }
+  const num = (t) => (/^\d+$/.test(t) ? Number(t) : Infinity);
+  return [...groups.entries()]
+    .sort((x, y) => (x[0] === lastTeam ? -1 : y[0] === lastTeam ? 1 : (num(x[0]) - num(y[0])) || String(x[0]).localeCompare(String(y[0]))))
+    .map(([team, list]) => ({ team, list }));
+}
+
+/** 배정 항목 상태: 이 휴대폰의 조사 기록 + 서버의 제출 기록 */
+export function assignmentStatus(a, localDrafts) {
+  const mine = localDrafts.filter((d) => d.assignId === a.id && d.mode !== 'supplement');
+  const editing = mine.find((d) => d.status === 'editing');
+  if (editing) return { kind: 'editing', draft: editing };
+  const done = (a.done || [])[0];
+  const sentLocal = mine.find((d) => d.serverId);
+  if (done || sentLocal) return { kind: 'done', tid: done?.tid || sentLocal.serverId, round: done?.round || sentLocal.round };
+  if (mine.some((d) => ['queued', 'sending', 'photos', 'failed'].includes(d.status))) return { kind: 'queued' };
+  return { kind: 'todo' };
 }
 
 /** 진행률: 필수 항목 중 답한 비율 대신 화면 위치 기준 */

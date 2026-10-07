@@ -65,16 +65,90 @@ const confirmBox = (title, body, yes = '예', no = '아니오') => modal(title, 
 async function loadConfig({ force = false } = {}) {
   const cached = await kv.get('config');
   if (cached && !force) useConfig(cached.data, cached.fetchedAt, true);
-  if (!navigator.onLine || !apiUrl()) return;
-  if (!ls.get('ts.password')) return; // 비밀번호를 넣기 전에는 서버에 묻지 않는다 (첫 화면에 경고가 뜨지 않게)
+  if (!navigator.onLine || !apiUrl()) { loadAssignments(); return; } // 인터넷이 없으면 저장된 배정 목록만
   try {
     const data = await call('config');
+    state.needPw = false;
     await kv.set('config', { data, fetchedAt: Date.now() });
     useConfig(data, Date.now(), false);
     if (force) toast('조사 항목을 새로 불러왔습니다.');
   } catch (e) {
+    // 서버에 비밀번호가 걸려 있을 때만 비밀번호 칸을 보여 준다 (경고 대신 안내)
+    if (/비밀번호/.test(e.message)) { state.needPw = true; return; }
     if (!cached || force) state.cfgError = e.message;
   }
+  loadAssignments();
+}
+
+// ---------- 배정 목록 ----------
+async function loadAssignments() {
+  const cached = await kv.get('assignments');
+  if (cached) state.assignments = cached.items;
+  if (!navigator.onLine || !apiUrl()) return;
+  try {
+    const res = await call('assignments');
+    state.assignments = res.items || [];
+    await kv.set('assignments', { items: state.assignments, fetchedAt: Date.now() });
+    if (state.view === 'home') renderHome();
+  } catch { /* 예전 서버(배정 기능 없음)거나 끊김 — 저장된 목록을 씀 */ }
+}
+
+function todayText() {
+  const t = new Date();
+  return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`;
+}
+
+const DOW = ['일', '월', '화', '수', '목', '금', '토'];
+function dateLabel(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || '');
+  if (!m) return s || '';
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return `${Number(m[2])}월 ${Number(m[3])}일 (${DOW[d.getDay()]})${s === todayText() ? ' · 오늘' : ''}`;
+}
+
+const ASSIGN_TEXT = { todo: '조사 전', editing: '입력 중', queued: '제출 대기', done: '제출됨' };
+
+function assignmentsHtml(allDrafts) {
+  const items = state.assignments || [];
+  if (!items.length) return '';
+  const { dates, pick } = L.assignmentDates(items, todayText());
+  if (!state.assignDate || !dates.includes(state.assignDate)) state.assignDate = pick;
+  const date = state.assignDate;
+  const i = dates.indexOf(date);
+  const groups = L.assignmentsByTeam(items, date, ls.get('ts.lastTeam'));
+  const noToday = !dates.includes(todayText());
+  return `<h2 class="sec">배정된 화장실</h2>
+    <div class="date-nav">
+      <button class="btn nav" id="dprev" ${i <= 0 ? 'disabled' : ''} aria-label="이전 날짜">◀</button>
+      <div class="date-label">${esc(dateLabel(date))}</div>
+      <button class="btn nav" id="dnext" ${i >= dates.length - 1 ? 'disabled' : ''} aria-label="다음 날짜">▶</button>
+    </div>
+    ${noToday && date !== todayText() ? '<p class="hint">오늘 배정된 화장실은 없습니다. 가장 가까운 날짜를 보여 드립니다.</p>' : ''}
+    ${groups.map((g) => `<div class="team-group">
+      <h3 class="team-title">${/^\d+$/.test(g.team) ? `${esc(g.team)}조` : esc(g.team)} <span class="sub">${g.list.length}곳</span></h3>
+      ${g.list.map((a) => {
+        const st = L.assignmentStatus(a, allDrafts);
+        return `<button class="card pick assign" data-assign="${esc(a.id)}">
+          <div class="row"><b class="grow">${esc(a.name)}</b><span class="status s-a-${st.kind}">${ASSIGN_TEXT[st.kind]}${st.tid ? ` ${esc(st.tid)}` : ''}</span></div>
+          <div class="sub">${esc((a.road && a.road !== '-') ? a.road : (a.lot || ''))}${a.memo ? ` · ${esc(a.memo)}` : ''}</div></button>`;
+      }).join('')}</div>`).join('')}`;
+}
+
+async function openAssignment(id) {
+  const a = (state.assignments || []).find((x) => x.id === id);
+  if (!a) return;
+  ls.set('ts.lastTeam', a.team);
+  const st = L.assignmentStatus(a, await drafts.all());
+  if (st.kind === 'editing') return openDraft(st.draft.localId);
+  if (st.kind === 'queued') { toast('이 휴대폰에서 이미 제출해 전송을 기다리는 화장실입니다.'); return; }
+  if (st.kind === 'done') {
+    const choice = await modal('이미 제출된 화장실입니다', `<p><b>${esc(a.name)}</b>은(는) ${esc(st.tid)} ${st.round || ''}차로 제출되어 있습니다.</p><p>빈칸만 채우려면 "빈칸 보완", 처음부터 다시 조사하려면 "다시 조사"를 눌러 주세요.</p>`,
+      [{ label: '취소', value: '' }, { label: '다시 조사', value: 're' }, { label: '빈칸 보완', value: 'supp', primary: true }]);
+    if (choice === 'supp') return startSupplementFromServer(st.tid);
+    if (choice === 're') return startResurvey(st.tid, { assignId: a.id, assignTeam: a.team, assignDate: a.date });
+    return;
+  }
+  await begin(L.draftFromAssignment(a, { surveyor: ls.get('ts.surveyor') }));
 }
 function useConfig(data, fetchedAt, fromCache) {
   state.cfg = L.prepareConfig(structuredClone(data));
@@ -96,7 +170,7 @@ async function renderHome() {
   };
   const editing = all.filter((d) => d.status === 'editing');
   const sent = all.filter((d) => d.status !== 'editing');
-  const needsPw = !ls.get('ts.password');
+  const needsPw = !!state.needPw;
   const noUrl = !apiUrl() || apiUrl().includes('여기에');
   const info = state.cfgInfo;
 
@@ -108,7 +182,8 @@ async function renderHome() {
     ${state.cfgError && !needsPw ? `<div class="alert">${/비밀번호/.test(state.cfgError)
       ? '비밀번호가 바뀌었을 수 있습니다. 아래 "설정·정보 → 비밀번호 다시 입력"을 눌러 새 비밀번호를 넣어 주세요.'
       : `조사 항목을 불러오지 못했습니다: ${esc(state.cfgError)}`}</div>` : ''}
-    ${needsPw ? '<div class="card welcome"><p class="big-text">조사자 이름과 비밀번호를 입력해 주세요.</p><p class="hint">비밀번호는 조사팀에서 안내받은 것을 넣고 "확인"을 누르면 됩니다. 처음 한 번만 넣으면 다음부터는 기억합니다.</p></div>' : ''}
+    ${needsPw ? '<div class="card welcome"><p class="big-text">조사자 이름과 비밀번호를 입력해 주세요.</p><p class="hint">비밀번호는 조사팀에서 안내받은 것을 넣고 "확인"을 누르면 됩니다. 처음 한 번만 넣으면 다음부터는 기억합니다.</p></div>'
+      : (!ls.get('ts.surveyor') ? '<div class="card welcome"><p class="big-text">조사자 이름을 입력해 주세요.</p><p class="hint">처음 한 번만 넣으면 다음부터는 기억합니다.</p></div>' : '')}
     ${info?.problems?.length ? `<div class="alert">항목정의를 확인해 주세요 (관리자에게 알려 주세요): ${esc(info.problems.join(' / '))}</div>` : ''}
 
     <section class="card">
@@ -120,6 +195,8 @@ async function renderHome() {
       ${state.pwWrong ? '<div class="warn">비밀번호가 맞지 않습니다. 다시 확인해 주세요.</div>' : ''}` : ''}
     </section>
 
+    ${state.cfg ? assignmentsHtml(all) : ''}
+    ${(state.assignments || []).length ? '<h2 class="sec">목록에 없는 화장실</h2>' : ''}
     <button class="btn primary big" id="new" ${state.cfg ? '' : 'disabled'}>새 조사 시작</button>
     <button class="btn big" id="resurvey" ${state.cfg ? '' : 'disabled'}>이미 조사한 화장실 다시 조사</button>
     <button class="btn big" id="supplement" ${state.cfg ? '' : 'disabled'}>제출한 조사 보완 (빈칸 채우기)</button>
@@ -207,7 +284,10 @@ async function renderHome() {
     renderHome();
   });
   document.getElementById('reload').onclick = async () => { await loadConfig({ force: true }); renderHome(); };
-  document.getElementById('resetpw').onclick = () => { ls.set('ts.password', ''); renderHome(); };
+  document.getElementById('resetpw').onclick = () => { ls.set('ts.password', ''); state.needPw = true; renderHome(); };
+  document.getElementById('dprev')?.addEventListener('click', () => { const { dates } = L.assignmentDates(state.assignments, todayText()); state.assignDate = dates[Math.max(0, dates.indexOf(state.assignDate) - 1)]; renderHome(); });
+  document.getElementById('dnext')?.addEventListener('click', () => { const { dates } = L.assignmentDates(state.assignments, todayText()); state.assignDate = dates[Math.min(dates.length - 1, dates.indexOf(state.assignDate) + 1)]; renderHome(); });
+  $app.querySelectorAll('[data-assign]').forEach((b) => { b.onclick = () => { if (!needName()) openAssignment(b.dataset.assign); }; });
 }
 
 // ---------- 재조사 목록 ----------
@@ -244,12 +324,13 @@ async function renderResurvey(mode = 'resurvey') {
   }
 }
 
-async function startResurvey(id) {
+async function startResurvey(id, extra = {}) {
   let prev;
   try { prev = await call('getToilet', { id }); } catch (e) { toast(e.message); return; }
   const d = L.newDraft({ surveyor: ls.get('ts.surveyor'), resurveyOf: id });
   L.prefillFromPrevious(state.cfg, d, prev);
   d.prevRound = prev.round;
+  Object.assign(d, extra); // 배정 목록에서 다시 조사하면 배정번호를 이어서 저장
   await begin(d);
 }
 
@@ -583,7 +664,7 @@ function itemHtml(it, ctx, draftPhotos, sug) {
     else if (it.naButton !== false || isNA) input += `<button class="btn small na ${isNA ? 'on' : ''}" data-na aria-pressed="${isNA}">해당 없음</button>`;
   }
   return `<div class="item ${it.required ? 'req' : ''} ${locked ? 'is-locked' : ''}" data-code="${esc(it.code)}" data-ctx="${esc(ctx)}">
-    <div class="q"><label for="${fid}">${esc(it.question)}</label>${it.required ? ' <span class="req-mark">필수</span>' : ''}${prefilled ? ' <span class="tag">이전 조사 값</span>' : ''}${locked ? ' <span class="tag saved">저장됨</span>' : ''}</div>
+    <div class="q"><label for="${fid}">${esc(it.question)}</label>${it.required ? ' <span class="req-mark">필수</span>' : ''}${prefilled ? ` <span class="tag">${esc(d.prefillLabel || '이전 조사 값')}</span>` : ''}${locked ? ' <span class="tag saved">저장됨</span>' : ''}</div>
     ${it.how ? `<div class="how">${esc(it.how)}</div>` : ''}
     ${input}
     <div class="feedback">${feedbackHtml(it, raw)}${L.multiWarning(state.cfg, it, raw) ? `<div class="warn">${esc(L.multiWarning(state.cfg, it, raw))}</div>` : ''}</div>
