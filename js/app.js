@@ -113,6 +113,17 @@ const ASSIGN_TEXT = { todo: '조사 전', editing: '입력 중', queued: '제출
 const teamLabel = (t) => (/^\d+$/.test(String(t || '')) ? `${t}조` : String(t || ''));
 const currentTeam = () => ls.get('ts.lastTeam');
 
+/** 조 버튼: 고르기 전엔 5칸씩 번호판, 고른 뒤엔 한 줄로 접힘("3조 · 조 바꾸기"). 오늘 배정 있는 조는 노랗게 */
+function teamChipsHtml(teams, team, activeToday) {
+  if (team && !state.pickTeam) {
+    return `<div class="team-picked"><span class="team-now">${esc(teamLabel(team))}</span>
+      <button class="btn" id="changeTeam">조 바꾸기</button></div>`;
+  }
+  return `<h2 class="sec">오늘 활동하는 조를 눌러 주세요</h2>
+    <div class="team-chips">${teams.map((t) => `<button class="team-chip ${t === team ? 'on' : ''} ${activeToday.has(t) ? 'today' : ''}" data-team="${esc(t)}" aria-pressed="${t === team}">${esc(teamLabel(t))}</button>`).join('')}</div>
+    <p class="hint cal-legend">${activeToday.size ? '노란 조 = 오늘 배정이 있는 조 · ' : ''}고른 조가 조사자로 기록됩니다</p>`;
+}
+
 /** 처음 화면: 조 버튼 → 그 조의 한 주 달력(배정된 날 표시, 오늘이 먼저 골라짐) → 고른 날의 화장실 목록. 배정이 없으면 1~10조 버튼만 */
 function teamHtml(allDrafts) {
   const items = state.assignments || [];
@@ -121,15 +132,14 @@ function teamHtml(allDrafts) {
   if (!items.length) {
     const teams = Array.from({ length: 10 }, (_, k) => String(k + 1));
     if (team && !teams.includes(team)) teams.push(team);
-    return `<h2 class="sec">오늘 활동하는 조</h2>
-      <div class="team-chips">${teams.map((t) => `<button class="choice team-chip ${t === team ? 'on' : ''}" data-team="${esc(t)}" aria-pressed="${t === team}">${esc(teamLabel(t))}</button>`).join('')}</div>`;
+    return teamChipsHtml(teams, team, new Set());
   }
   const today = todayText();
   const teams = L.assignmentTeams(items);
   if (team && !teams.includes(team)) teams.push(team);
-  const chips = `<h2 class="sec">오늘 활동하는 조</h2>
-    <div class="team-chips">${teams.map((t) => `<button class="choice team-chip ${t === team ? 'on' : ''}" data-team="${esc(t)}" aria-pressed="${t === team}">${esc(teamLabel(t))}</button>`).join('')}</div>`;
-  if (!team) return `${chips}<p class="hint">조를 누르면 그 조의 달력과 화장실 목록이 나옵니다.</p>`;
+  const chips = teamChipsHtml(teams, team, new Set(items.filter((a) => a.date === today).map((a) => a.team)));
+  if (!team) return chips;
+  if (state.pickTeam) return chips;
 
   const teamItems = items.filter((a) => a.team === team);
   // 조를 새로 고르면: 오늘 → 없으면 가장 가까운 다음 배정일 → 없으면 마지막 배정일
@@ -224,7 +234,7 @@ async function renderHome() {
       ? '비밀번호가 바뀌었을 수 있습니다. 아래 "설정·정보 → 비밀번호 다시 입력"을 눌러 새 비밀번호를 넣어 주세요.'
       : `조사 항목을 불러오지 못했습니다: ${esc(state.cfgError)}`}</div>` : ''}
     ${needsPw ? '<div class="card welcome"><p class="big-text">조사자 이름과 비밀번호를 입력해 주세요.</p><p class="hint">비밀번호는 조사팀에서 안내받은 것을 넣고 "확인"을 누르면 됩니다. 처음 한 번만 넣으면 다음부터는 기억합니다.</p></div>'
-      : (!currentTeam() ? '<div class="card welcome"><p class="big-text">오늘 활동하는 조를 눌러 주세요.</p><p class="hint">고른 조가 조사자로 기록됩니다. 다음에 열면 그 조가 선택돼 있고, 다른 조에 들어가는 날에는 버튼만 바꿔 누르면 됩니다.</p></div>' : '')}
+      : ''}
     ${info?.problems?.length ? `<div class="alert">항목정의를 확인해 주세요 (관리자에게 알려 주세요): ${esc(info.problems.join(' / '))}</div>` : ''}
 
     ${needsPw ? `<section class="card">
@@ -291,7 +301,8 @@ async function renderHome() {
     document.querySelector('.team-chip')?.focus();
     return true;
   };
-  $app.querySelectorAll('[data-team]').forEach((b) => { b.onclick = () => { ls.set('ts.lastTeam', b.dataset.team); renderHome(); }; });
+  $app.querySelectorAll('[data-team]').forEach((b) => { b.onclick = () => { ls.set('ts.lastTeam', b.dataset.team); state.pickTeam = false; renderHome(); }; });
+  document.getElementById('changeTeam')?.addEventListener('click', () => { state.pickTeam = true; renderHome(); });
   document.getElementById('new').onclick = () => { if (!needName()) startNew(); };
   document.getElementById('resurvey').onclick = () => { if (!needName()) renderResurvey('resurvey'); };
   document.getElementById('supplement').onclick = () => { if (!needName()) renderResurvey('supplement'); };

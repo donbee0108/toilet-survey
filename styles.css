@@ -157,9 +157,13 @@ button.progress { border: 2px solid var(--line); border-radius: var(--radius); b
 .s-a-queued { color: #6a4a00; background: var(--warn-bg); }
 .s-a-done { color: var(--ok); background: var(--ok-bg); }
 
-.team-chips { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; margin: 8px 0 12px; }
-.team-chip { text-align: center; min-height: 56px; }
-.team-chip small { font-weight: 600; }
+.team-chips { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin: 8px 0 4px; }
+.team-chip { min-height: 52px; padding: 0 2px; border: 2px solid #666; border-radius: 10px; background: #fff; color: #111; font: inherit; font-size: 20px; font-weight: 800; white-space: nowrap; }
+.team-chip.today { background: #ffe066; border-color: #111; }
+.team-chip.on { background: var(--primary); color: #fff; border-color: var(--primary); }
+.team-picked { display: flex; align-items: center; gap: 12px; margin: 24px 0 8px; }
+.team-now { flex: 1; font-size: 26px; font-weight: 900; padding: 8px 14px; border-radius: 10px; background: var(--primary); color: #fff; text-align: center; }
+.team-picked .btn { min-height: 52px; padding: 8px 16px; }
 
 .cal { margin: 4px 0 8px; }
 .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
