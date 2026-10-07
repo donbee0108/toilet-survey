@@ -658,7 +658,9 @@ function bindPage(page) {
       b.onclick = () => {
         const v = b.dataset.multi;
         const cur = L.splitMulti(L.getRaw(d, ctx, code));
-        const next = cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v];
+        let next = cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v];
+        // '없음'은 다른 보기와 함께 고를 수 없다: 없음을 누르면 나머지를 끄고, 다른 보기를 누르면 없음을 끈다
+        if (!cur.includes(v)) next = v === 'NONE' ? ['NONE'] : next.filter((x) => x !== 'NONE');
         L.setRaw(d, ctx, code, L.joinMulti(state.cfg, it, next));
         markTouched(ctx, code); saveSoon(); keepScroll(renderPage);
       };

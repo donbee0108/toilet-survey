@@ -35,6 +35,7 @@ export function appliesTo(item, kind) {
   switch (item.scope) {
     case '장애인화장실': return kind === 'MULTI';
     case '남·여': return kind === 'MALE' || kind === 'FEMALE';
+    case '장애인·남·여': return kind === 'MULTI' || kind === 'MALE' || kind === 'FEMALE';
     case '남': return kind === 'MALE';
     case '여': return kind === 'FEMALE';
     default: return false;
@@ -153,7 +154,17 @@ function sectionPages(items, ctx, spaceLabel) {
   let cur = null;
   const flush = () => {
     if (!cur) return;
-    const parts = chunk(cur.codes);
+    // 항목정의 '새 화면'=예 인 질문부터 다음 쪽. 바로 앞 질문도 '새 화면'이면 한 번만 나눈다
+    // (예: 남자화장실은 D10부터, D10이 없는 여자화장실은 E4a부터 2쪽). 한 쪽이 8문항을 넘으면 그 쪽은 다시 자동으로 나눔.
+    const groups = [];
+    let prevBreak = false;
+    cur.items.forEach((it, i) => {
+      const brk = !!it.pageBreak;
+      if (i === 0 || (brk && !prevBreak)) groups.push([]);
+      groups[groups.length - 1].push(it.code);
+      prevBreak = brk;
+    });
+    const parts = groups.flatMap((g) => chunk(g));
     parts.forEach((codes, i) => pages.push({
       id: `${ctx}|${cur.section}|${codes[0]}`, type: 'items', ctx, spaceLabel,
       title: cur.section + (parts.length > 1 ? ` (${i + 1}/${parts.length})` : ''), codes,
@@ -161,8 +172,8 @@ function sectionPages(items, ctx, spaceLabel) {
     cur = null;
   };
   for (const it of items) {
-    if (!cur || cur.section !== it.section) { flush(); cur = { section: it.section, codes: [] }; }
-    cur.codes.push(it.code);
+    if (!cur || cur.section !== it.section) { flush(); cur = { section: it.section, items: [] }; }
+    cur.items.push(it);
   }
   flush();
   return pages;
@@ -364,9 +375,20 @@ export function suggestH(cfg, draft) {
   if (cfg.byCode.H4) {
     const hasF6 = !!cfg.byCode.F6;
     const f6 = hasF6 ? fv(TOILET, 'F6') : '';
-    const f7 = splitMulti(fv(TOILET, 'F7'));
+    // F7이 공간 항목(v4)이면 장애인 칸·남녀 화장실의 답을 모두 모은다
+    const f7Item = cfg.byCode.F7;
+    const f7 = !f7Item ? [] : f7Item.tab === '화장실'
+      ? splitMulti(fv(TOILET, 'F7'))
+      : allSpaces(draft).filter((sp) => appliesTo(f7Item, sp.kind)).flatMap((sp) => splitMulti(fv(sp.key, 'F7')).filter((x) => x !== 'NA'));
     const f7Known = f7.length && !f7.includes('UNKNOWN') && !f7.includes('NA');
-    if (f6 === 'Y' || f7.includes('TEXT')) out.H4 = { value: 'Y', reason: f6 === 'Y' ? "'호출됨' 불빛이 있습니다." : '비상벨을 누른 뒤 문자·화상으로 소통할 수 있습니다.' };
+    // v4: 모든 칸의 '비상벨이 있는 변기 칸 수'가 0이면 비상벨 자체가 없음
+    const f3Item = cfg.byCode.F3;
+    const f3s = f3Item && f3Item.tab !== '화장실'
+      ? allSpaces(draft).filter((sp) => appliesTo(f3Item, sp.kind)).map((sp) => fv(sp.key, 'F3')).filter((v) => v !== 'NA')
+      : [];
+    const noBells = f3s.length > 0 && f3s.every((v) => num(v) === 0);
+    if (noBells) out.H4 = { value: 'N', reason: '비상벨이 있는 칸이 없습니다.' };
+    else if (f6 === 'Y' || f7.includes('TEXT')) out.H4 = { value: 'Y', reason: f6 === 'Y' ? "'호출됨' 불빛이 있습니다." : '비상벨을 누른 뒤 문자·화상으로 소통할 수 있습니다.' };
     else if (f7Known && (!hasF6 || !blank(f6))) out.H4 = { value: 'N', reason: '비상벨을 누른 뒤 문자·화상으로 소통할 방법이 없습니다.' };
     else out.H4 = { value: null, reason: "'비상벨 누른 뒤 소통할 방법' 답이 없거나 '알 수 없음'이라 제안하지 못했습니다." };
   }
