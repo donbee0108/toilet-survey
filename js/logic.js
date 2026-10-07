@@ -674,22 +674,18 @@ export function assignmentTeams(items) {
     .sort((x, y) => (num(x) - num(y)) || String(x).localeCompare(String(y)));
 }
 
-/** 달력 한 달: 'YYYY-MM' → 7칸씩 채운 배열, 빈칸은 null, 날짜는 'YYYY-MM-DD' */
-export function monthGrid(ym) {
-  const [y, m] = ym.split('-').map(Number);
-  const first = new Date(y, m - 1, 1).getDay();
-  const days = new Date(y, m, 0).getDate();
-  const cells = Array(first).fill(null);
-  for (let d = 1; d <= days; d++) cells.push(`${ym}-${String(d).padStart(2, '0')}`);
-  while (cells.length % 7) cells.push(null);
-  return cells;
+/** 'YYYY-MM-DD'에서 n일 이동 */
+export function shiftDays(date, n) {
+  const [y, m, d] = date.split('-').map(Number);
+  const t = new Date(y, m - 1, d + n);
+  return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
 }
 
-/** 'YYYY-MM'에서 n달 이동 */
-export function shiftMonth(ym, n) {
-  const [y, m] = ym.split('-').map(Number);
-  const d = new Date(y, m - 1 + n, 1);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+/** 그 날짜가 든 주의 7일 (일요일부터) */
+export function weekDays(date) {
+  const [y, m, d] = date.split('-').map(Number);
+  const sun = shiftDays(date, -new Date(y, m - 1, d).getDay());
+  return Array.from({ length: 7 }, (_, i) => shiftDays(sun, i));
 }
 
 /** 배정 항목 상태: 이 휴대폰의 조사 기록 + 서버의 제출 기록 */

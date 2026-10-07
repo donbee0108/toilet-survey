@@ -113,7 +113,7 @@ const ASSIGN_TEXT = { todo: '조사 전', editing: '입력 중', queued: '제출
 const teamLabel = (t) => (/^\d+$/.test(String(t || '')) ? `${t}조` : String(t || ''));
 const currentTeam = () => ls.get('ts.lastTeam');
 
-/** 처음 화면: 조 버튼 → 그 조의 달력(배정된 날 표시, 오늘이 먼저 골라짐) → 고른 날의 화장실 목록. 배정이 없으면 1~10조 버튼만 */
+/** 처음 화면: 조 버튼 → 그 조의 한 주 달력(배정된 날 표시, 오늘이 먼저 골라짐) → 고른 날의 화장실 목록. 배정이 없으면 1~10조 버튼만 */
 function teamHtml(allDrafts) {
   const items = state.assignments || [];
   const team = currentTeam();
@@ -136,10 +136,10 @@ function teamHtml(allDrafts) {
   if (state.calTeam !== team || !state.assignDate) {
     state.calTeam = team;
     state.assignDate = L.assignmentDates(teamItems, today).pick;
-    state.calMonth = state.assignDate.slice(0, 7);
+    state.calWeek = state.assignDate;
   }
   const date = state.assignDate;
-  const ym = state.calMonth || date.slice(0, 7);
+  const week = L.weekDays(state.calWeek || date);
   const byDate = new Map();
   for (const a of teamItems) {
     const s = byDate.get(a.date) || { n: 0, done: 0 };
@@ -147,21 +147,20 @@ function teamHtml(allDrafts) {
     if (L.assignmentStatus(a, allDrafts).kind === 'done') s.done++;
     byDate.set(a.date, s);
   }
-  const [cy, cm] = ym.split('-').map(Number);
+  const md = (d) => `${Number(d.slice(5, 7))}월 ${Number(d.slice(8))}일`;
   const cal = `<div class="cal">
       <div class="date-nav">
-        <button class="btn nav" id="mprev" aria-label="이전 달">◀</button>
-        <div class="date-label">${cy}년 ${cm}월</div>
-        <button class="btn nav" id="mnext" aria-label="다음 달">▶</button>
+        <button class="btn nav" id="wprev" aria-label="이전 주">◀</button>
+        <div class="date-label week-label">${md(week[0])}~${week[0].slice(5, 7) === week[6].slice(5, 7) ? `${Number(week[6].slice(8))}일` : md(week[6])}</div>
+        <button class="btn nav" id="wnext" aria-label="다음 주">▶</button>
       </div>
       <div class="cal-grid">${DOW.map((w) => `<div class="cal-dow">${w}</div>`).join('')}
-      ${L.monthGrid(ym).map((d) => {
-        if (!d) return '<div></div>';
+      ${week.map((d) => {
         const s = byDate.get(d);
         const cls = ['cal-day', s ? 'has' : '', s && s.done === s.n ? 'all-done' : '', d === today ? 'today' : '', d === date ? 'on' : ''].filter(Boolean).join(' ');
         return `<button class="${cls}" data-day="${d}" aria-pressed="${d === date}" aria-label="${esc(dateLabel(d))}${s ? ` 배정 ${s.n}곳` : ''}"><span>${Number(d.slice(8))}</span>${s ? `<small>${s.done === s.n ? '✓' : `${s.n}곳`}</small>` : ''}</button>`;
       }).join('')}</div>
-      <p class="hint cal-legend">노란 날 = ${esc(teamLabel(team))} 배정일 · 초록 ✓ = 모두 제출 · 굵은 테두리 = 오늘</p>
+      <p class="hint cal-legend">노란 날 = ${esc(teamLabel(team))} 배정일 · 초록 ✓ = 모두 제출 · 굵은 테두리 = 오늘${week.includes(today) ? '' : ' <button class="linklike" id="wtoday">오늘로 돌아가기</button>'}</p>
     </div>`;
   const list = teamItems.filter((a) => a.date === date);
   const mine = list.length ? { list } : null;
@@ -325,8 +324,9 @@ async function renderHome() {
   });
   document.getElementById('reload').onclick = async () => { await loadConfig({ force: true }); renderHome(); };
   document.getElementById('resetpw').onclick = () => { ls.set('ts.password', ''); state.needPw = true; renderHome(); };
-  document.getElementById('mprev')?.addEventListener('click', () => { state.calMonth = L.shiftMonth(state.calMonth, -1); renderHome(); });
-  document.getElementById('mnext')?.addEventListener('click', () => { state.calMonth = L.shiftMonth(state.calMonth, 1); renderHome(); });
+  document.getElementById('wprev')?.addEventListener('click', () => { state.calWeek = L.shiftDays(state.calWeek, -7); renderHome(); });
+  document.getElementById('wnext')?.addEventListener('click', () => { state.calWeek = L.shiftDays(state.calWeek, 7); renderHome(); });
+  document.getElementById('wtoday')?.addEventListener('click', () => { state.calWeek = state.assignDate = todayText(); renderHome(); });
   $app.querySelectorAll('[data-day]').forEach((b) => { b.onclick = () => { state.assignDate = b.dataset.day; renderHome(); }; });
   $app.querySelectorAll('[data-assign]').forEach((b) => { b.onclick = () => { if (!needName()) openAssignment(b.dataset.assign); }; });
 }
