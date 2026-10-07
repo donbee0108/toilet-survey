@@ -197,7 +197,13 @@ async function openAssignment(id) {
     const choice = await modal('이미 제출된 화장실입니다', `<p><b>${esc(a.name)}</b>은(는) ${esc(st.tid)} ${st.round || ''}차로 제출되어 있습니다.</p><p>빈칸만 채우려면 "빈칸 보완", 처음부터 다시 조사하려면 "다시 조사"를 눌러 주세요.</p>`,
       [{ label: '취소', value: '' }, { label: '다시 조사', value: 're' }, { label: '빈칸 보완', value: 'supp', primary: true }]);
     if (choice === 'supp') return startSupplementFromServer(st.tid);
-    if (choice === 're') return startResurvey(st.tid, { assignId: a.id, assignTeam: a.team, assignDate: a.date });
+    if (choice === 're') {
+      if (!(await confirmBox('다시 조사', '<p>기존에 입력된 답변이 모두 삭제됩니다. 다시 시작하시겠습니까?</p>', '다시 시작', '취소'))) return;
+      // 처음부터 새로 (이름·주소만 배정 목록에서), 같은 화장실번호의 다음 차수로 저장
+      const d = L.draftFromAssignment(a, { surveyor: teamLabel(currentTeam()) });
+      d.resurveyOf = st.tid;
+      return begin(d);
+    }
     return;
   }
   await begin(L.draftFromAssignment(a, { surveyor: teamLabel(currentTeam()) }));
@@ -266,7 +272,7 @@ async function renderHome() {
         return `<div class="card row">
           <div class="grow"><b>${esc(d.toilet.B0a || '(이름 없음)')}</b> ${d.serverId ? `<span class="tag">${supp ? '보완 · ' : ''}${esc(d.serverId)} · ${d.round}차</span>` : ''}
             <div class="sub">${dateText(d.queuedAt)} ${supp ? '보완 제출' : '제출'} · 사진 ${ps.done}/${ps.total}장</div>
-            ${supp && d.result ? `<div class="sub">${d.result.filled}칸 채움${d.result.skipped?.length ? ` · 이미 값이 있어 그대로 둔 칸 ${d.result.skipped.length}개` : ''}</div>` : ''}
+            ${supp && d.result ? `<div class="sub">${d.result.filled}칸 채움${d.result.edited ? ` · ${d.result.edited}칸 고침` : ''}${d.result.skipped?.length ? ` · 이미 값이 있어 그대로 둔 칸 ${d.result.skipped.length}개` : ''}</div>${d.result.conflicts?.length ? `<div class="err">다른 기기가 먼저 고쳐서 못 고친 칸 ${d.result.conflicts.length}개 — 보완을 다시 열어 확인해 주세요.</div>` : ''}${d.result.editsIgnored ? `<div class="err">고친 칸 ${d.result.editsIgnored}개가 반영되지 않았습니다 — 관리자에게 알려 주세요(서버 Code.gs 새 버전 배포 필요).</div>` : ''}` : ''}
             ${canSupplement ? `<button class="btn small" data-supp="${d.localId}">빈칸 보완하기</button>` : ''}
             ${d.error ? `<div class="err">${esc(d.error)}</div>` : ''}
             ${d.warnings?.length ? `<div class="err">시트에 열이 없어 저장되지 않은 값: ${esc(d.warnings.join(', '))} — 관리자에게 알려 주세요.</div>` : ''}</div>
@@ -586,6 +592,7 @@ function numberWarningsOnPage(page) {
 
 async function renderPage() {
   const d = state.draft;
+  if (d.mode === 'supplement' && L.reopenSkipped(state.cfg, d)) saveSoon();
   refreshPages();
   let page = currentPage();
   if (!page) { d.pageId = state.pages[0].id; page = state.pages[0]; }
@@ -616,7 +623,7 @@ async function renderPage() {
       <button class="progress" id="toc" aria-label="목차 열기, 진행률 ${pct}%"><div class="progress-text">${i + 1} / ${total} · 목차 ☰</div><div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div></button>
       ${page.type === 'review' ? '<span class="nav-spacer"></span>' : '<button class="btn nav primary" id="next">다음 →</button>'}
     </div>
-    ${d.mode === 'supplement' ? `<div class="mode-banner">보완 중 · ${esc(d.serverId)} ${d.round}차 — 빈칸만 채울 수 있습니다
+    ${d.mode === 'supplement' ? `<div class="mode-banner">보완 중 · ${esc(d.serverId)} ${d.round}차 — 빈칸을 채우고, 저장된 값은 ✏️ 고치기로 고칩니다
       <button class="btn small" id="fresh">🔄 다른 기기 값 불러오기</button>
       <div class="sub">${d.freshAt ? `시트 값 확인: ${dateText(d.freshAt).slice(11)}` : ''}</div></div>` : ''}
     ${page.spaceLabel ? `<div class="space-banner ${bannerClass(page.ctx)}">${esc(page.spaceLabel)}</div>` : ''}
@@ -703,7 +710,7 @@ function startHtml() {
   const gps = d.lat != null ? `위도 ${d.lat}, 경도 ${d.lng}${d.gpsAccuracy ? ` (오차 약 ${d.gpsAccuracy}m)` : ''}` : (d.gpsError || '위치 없음');
   return `<div class="card">
     <p class="big-text">조사한 조: <b>${esc(d.surveyor)}</b></p>
-    ${d.resurveyOf ? `<p class="big-text">재조사: <b>${esc(d.resurveyOf)}</b> (이전 ${d.prevRound || ''}차 조사 값이 미리 채워져 있습니다. 하나씩 확인하고 바뀐 것만 고쳐 주세요.)</p>` : ''}
+    ${d.resurveyOf ? `<p class="big-text">재조사: <b>${esc(d.resurveyOf)}</b> ${d.prevRound ? `(이전 ${d.prevRound}차 조사 값이 미리 채워져 있습니다. 하나씩 확인하고 바뀐 것만 고쳐 주세요.)` : '— 처음부터 새로 조사합니다.'}</p>` : ''}
     ${d.mode === 'supplement' ? `<p class="big-text">보완: <b>${esc(d.serverId)} ${d.round}차</b> — ${esc(d.toilet.B0a || '')}</p>
       <p>이미 저장된 칸은 <b>"저장됨"</b>으로 잠겨 있고, <b>빈칸만</b> 채울 수 있습니다. 위의 "목차"를 누르면 빈칸이 있는 곳으로 바로 갈 수 있습니다.</p></div>`
     : `<p class="big-text">현재 위치: ${esc(gps)}</p>
@@ -741,6 +748,8 @@ function itemHtml(it, ctx, draftPhotos, sug) {
   const myPhotos = draftPhotos.filter((p) => p.itemCode === it.code && (p.spaceKey || L.TOILET) === ctx);
   const locked = L.isLocked(d, ctx, it.code);
   if (locked) sug = null;
+  const edited = L.isEdited(state.cfg, d, ctx, it.code);
+  const origText = d.orig?.[key] === 'NA' ? '해당 없음' : (it.list ? String(d.orig?.[key] ?? '').split(',').map((v) => choiceLabel(it, v)).join(', ') : d.orig?.[key]);
   let input = '';
   if (it.type === L.MULTI) {
     const opts = state.cfg.choices[it.list] || [];
@@ -766,7 +775,7 @@ function itemHtml(it, ctx, draftPhotos, sug) {
     else if (it.naButton !== false || isNA) input += `<button class="btn small na ${isNA ? 'on' : ''}" data-na aria-pressed="${isNA}">해당 없음</button>`;
   }
   return `<div class="item ${it.required ? 'req' : ''} ${locked ? 'is-locked' : ''}" data-code="${esc(it.code)}" data-ctx="${esc(ctx)}">
-    <div class="q"><label for="${fid}">${esc(it.question)}</label>${it.required ? ' <span class="req-mark">필수</span>' : ''}${prefilled ? ` <span class="tag">${esc(d.prefillLabel || '이전 조사 값')}</span>` : ''}${locked ? ' <span class="tag saved">저장됨</span>' : ''}</div>
+    <div class="q"><label for="${fid}">${esc(it.question)}</label>${it.required ? ' <span class="req-mark">필수</span>' : ''}${prefilled ? ` <span class="tag">${esc(d.prefillLabel || '이전 조사 값')}</span>` : ''}${locked ? ' <span class="tag saved">저장됨</span>' : ''}${edited ? ` <span class="tag edited">고침 · 전: ${esc(origText || '빈칸')}</span>` : ''}${L.canUnlock(d, ctx, it.code) ? ' <button class="btn small" data-unlock>✏️ 고치기</button>' : ''}</div>
     ${it.how ? `<div class="how">${esc(it.how)}</div>` : ''}
     ${input}
     <div class="feedback">${feedbackHtml(it, raw)}${L.multiWarning(state.cfg, it, raw) ? `<div class="warn">${esc(L.multiWarning(state.cfg, it, raw))}</div>` : ''}</div>
@@ -805,9 +814,9 @@ function reviewHtml(draftPhotos) {
     ${warns.length ? `<div class="card warnbox"><h2>확인이 필요한 답 ${warns.length}개</h2>
       ${warns.map(({ w, p }) => `<button class="btn list-btn" data-goto="${esc(p.id)}">${p.spaceLabel ? `[${esc(p.spaceLabel)}] ` : ''}${esc(w)}</button>`).join('')}</div>` : ''}
     ${d.mode === 'supplement'
-    ? `<div class="card"><p class="big-text">새로 채운 칸 <b>${L.buildSupplementPayload(state.cfg, d, '').count}개</b> · 새 사진 ${draftPhotos.length}장</p></div>
+    ? `<div class="card"><p class="big-text">${(() => { const b = L.buildSupplementPayload(state.cfg, d, ''); return `새로 채운 칸 <b>${b.filledCount}개</b> · 고친 칸 <b>${b.editCount}개</b>`; })()} · 새 사진 ${draftPhotos.length}장</p></div>
       <button class="btn primary big" id="submit">보완 제출</button>
-      <p class="hint">빈칸이었던 칸만 시트에 채워집니다. 이미 저장된 값은 바뀌지 않습니다.</p>`
+      <p class="hint">빈칸은 채우고, ✏️ 고치기로 고친 칸은 새 값으로 바꿉니다. 그사이 다른 기기가 같은 칸을 먼저 고쳤으면 그 칸은 바꾸지 않고 알려 드립니다.</p>`
     : `<button class="btn primary big" id="submit">제출하기</button>
     <p class="hint">제출하면 전송 대기열에 들어가고, 인터넷이 연결되면 자동으로 보냅니다. 제출한 뒤에도 빈칸은 처음 화면의 "빈칸 보완하기"로 채울 수 있습니다.</p>`}`;
 }
@@ -867,11 +876,16 @@ function bindPage(page) {
         L.setRaw(d, ctx, code, input.value);
         markTouched(ctx, code); saveSoon();
         el.querySelector('.feedback').innerHTML = feedbackHtml(it, input.value);
-        el.querySelector('.tag')?.remove();
+        el.querySelector('.q > .tag:not(.saved):not(.edited)')?.remove(); // '이전 조사 값' 표시만 지움
       });
-      // 숫자는 뒤 항목 건너뛰기에 영향을 줄 수 있어 입력을 마치면 화면을 다시 그린다
-      if (it.type === '숫자' || it.type === '정수') input.addEventListener('change', () => keepScroll(renderPage));
+      // 숫자는 뒤 항목 건너뛰기에 영향을 줄 수 있어, 보완에서 고친 칸은 '고침' 표시를 위해 입력을 마치면 다시 그린다
+      if (it.type === '숫자' || it.type === '정수' || d.unlocked?.[`${ctx}:${code}`]) input.addEventListener('change', () => keepScroll(renderPage));
     }
+    el.querySelector('[data-unlock]')?.addEventListener('click', () => {
+      if (!L.unlock(d, ctx, code)) return;
+      saveSoon();
+      keepScroll(renderPage).then(() => document.querySelector(`.item[data-code="${CSS.escape(code)}"][data-ctx="${CSS.escape(ctx)}"] [data-input]`)?.focus());
+    });
     // '없음' = 0개
     el.querySelector('[data-none]')?.addEventListener('click', () => {
       L.setRaw(d, ctx, code, L.getRaw(d, ctx, code) === '0' ? '' : '0');
@@ -942,10 +956,10 @@ async function submit() {
 }
 
 async function submitSupplement(d) {
-  const { payload, count } = L.buildSupplementPayload(state.cfg, d, nowText());
+  const { payload, count, filledCount, editCount } = L.buildSupplementPayload(state.cfg, d, nowText());
   const newPhotos = (await photos.byDraft(d.localId)).length;
-  if (!count && !newPhotos) { toast('새로 채운 칸이나 사진이 없습니다.'); return; }
-  const ok = await confirmBox('보완 제출할까요?', `<p>새로 채운 칸 <b>${count}개</b>, 사진 ${newPhotos}장을 ${esc(d.serverId)} ${d.round}차 조사에 더합니다.</p><p>시트에서 빈칸이었던 칸만 채워집니다.</p>`, '보완 제출', '취소');
+  if (!count && !newPhotos) { toast('새로 채우거나 고친 칸, 사진이 없습니다.'); return; }
+  const ok = await confirmBox('보완 제출할까요?', `<p>새로 채운 칸 <b>${filledCount}개</b>${editCount ? `, 고친 칸 <b>${editCount}개</b>` : ''}, 사진 ${newPhotos}장을 ${esc(d.serverId)} ${d.round}차 조사에 반영합니다.</p>`, '보완 제출', '취소');
   if (!ok) return;
   Object.assign(d, { submission: payload, status: 'queued', queuedAt: Date.now(), error: '' });
   await drafts.put(d);

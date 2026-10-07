@@ -20,7 +20,10 @@ async function sendDraft(d) {
       d.status = 'sending'; d.error = '';
       await drafts.put(d); emit();
       const res = await call('supplement', d.submission);
-      d.result = { filled: res.filled, skipped: res.skipped || [] };
+      d.result = { filled: res.filled, edited: res.edited || 0, conflicts: res.conflicts || [], skipped: res.skipped || [] };
+      // 예전 서버(Code.gs 갱신 전)는 고친 칸을 모른 채 무시한다 → 반영 안 됐다고 알려 준다
+      const sentEdits = Object.keys(d.submission.edits || {}).length + (d.submission.spaces || []).reduce((n, s) => n + Object.keys(s.edits || {}).length, 0);
+      if (sentEdits && res.edited === undefined) d.result.editsIgnored = sentEdits;
       d.warnings = res.warnings || [];
       d.supplementDone = true;
       d.status = 'photos';

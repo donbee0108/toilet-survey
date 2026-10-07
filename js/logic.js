@@ -54,6 +54,8 @@ export function newDraft({ surveyor = '', resurveyOf = null } = {}) {
     spaces: {}, // key → { values: {code: raw} }
     pageId: null, touched: {}, prefilled: {}, suggested: {},
     mode: 'new', locked: {}, orig: {}, replaceable: {}, // mode: new | supplement
+    unlocked: {}, // 보완: '고치기'를 눌러 저장된 값을 고칠 수 있게 연 칸
+    reopened: {}, // 보완: 앞 답을 고쳐 건너뛰지 않게 돼 NA를 풀어 다시 연 칸
   };
 }
 
@@ -530,7 +532,53 @@ export function supplementFromRows(cfg, draft, prev) {
   return draft;
 }
 
-export const isLocked = (draft, ctx, code) => !!draft.locked?.[`${ctx}:${code}`];
+export const isLocked = (draft, ctx, code) => !!draft.locked?.[`${ctx}:${code}`] && !draft.unlocked?.[`${ctx}:${code}`];
+
+/** 보완: 저장된 값을 '고치기'로 열 수 있는 칸인가 (장애인 화장실 칸 수처럼 구조를 정하는 답은 못 고침) */
+export function canUnlock(draft, ctx, code) {
+  const key = `${ctx}:${code}`;
+  return draft.mode === 'supplement' && !!draft.locked?.[key] && !draft.unlocked?.[key]
+    && !(ctx === TOILET && STRUCTURE_CODES.includes(code));
+}
+
+export function unlock(draft, ctx, code) {
+  if (!canUnlock(draft, ctx, code)) return false;
+  draft.unlocked = draft.unlocked || {};
+  draft.unlocked[`${ctx}:${code}`] = true;
+  return true;
+}
+
+/** 보완에서 고친 칸인가 (시트 값과 달라짐) */
+export function isEdited(cfg, draft, ctx, code) {
+  const key = `${ctx}:${code}`;
+  if (!draft.unlocked?.[key]) return false;
+  return String(normalize(cfg.byCode[code], getRaw(draft, ctx, code)) ?? '') !== String(normalize(cfg.byCode[code], draft.orig[key]) ?? '');
+}
+
+/**
+ * 보완에서 앞 질문을 고쳐 더 이상 건너뛰지 않게 된 질문: 시트의 NA는 건너뛰어서 생긴 것이므로
+ * 빈칸으로 열어 다시 답하게 한다. (원래 값 기준으로도 건너뛰던 NA만 — 직접 고른 NA는 그대로)
+ */
+export function reopenSkipped(cfg, draft) {
+  if (draft.mode !== 'supplement') return 0;
+  let n = 0;
+  for (const [key, o] of Object.entries(draft.orig || {})) {
+    if (o !== 'NA' || !draft.locked?.[key] || draft.unlocked?.[key]) continue;
+    const [ctx, code] = key.split(':');
+    const rule = cfg.byCode[code]?.rule;
+    if (!rule || rule.error) continue;
+    const refCtx = cfg.byCode[rule.ref]?.tab === '화장실' ? TOILET : ctx;
+    if (!shouldSkip(rule, normalize(cfg.byCode[rule.ref], draft.orig[`${refCtx}:${rule.ref}`] ?? ''))) continue;
+    if (isSkipped(cfg, draft, ctx, code)) continue;
+    draft.unlocked = draft.unlocked || {};
+    draft.unlocked[key] = true;
+    draft.reopened = draft.reopened || {};
+    draft.reopened[key] = true;
+    setRaw(draft, ctx, code, '');
+    n++;
+  }
+  return n;
+}
 
 /** 장애인 화장실 둘째 칸부터: 값을 복사해 올 첫 칸. 첫 칸이거나 장애인 칸이 아니면 null */
 export function copySourceFor(draft, ctx) {
@@ -583,6 +631,18 @@ export function mergeFresh(cfg, draft, prev) {
 
   const before = new Set(Object.keys(draft.locked || {}));
   const conflicts = [];
+  // 내가 '고치기'로 연 칸: 그사이 시트 값이 바뀌지 않았으면 내 값을 유지, 바뀌었으면 겹친 칸
+  for (const key of Object.keys(draft.unlocked || {})) {
+    const [ctx, code] = key.split(':');
+    if (!(key in fresh.orig)) continue;
+    if ((fresh.orig[key] ?? '') === (draft.orig[key] ?? '')) {
+      fresh.unlocked[key] = true;
+      if (draft.reopened?.[key]) fresh.reopened[key] = true;
+      setRaw(fresh, ctx, code, getRaw(draft, ctx, code) ?? '');
+    } else if (isEdited(cfg, draft, ctx, code) && !(draft.reopened?.[key] && !draft.touched?.[key])) {
+      conflicts.push({ ctx, code, mine: getRaw(draft, ctx, code) ?? '', theirs: getRaw(fresh, ctx, code) ?? '' });
+    }
+  }
   for (const { ctx, code, v } of mine) {
     const key = `${ctx}:${code}`;
     if (fresh.locked[key]) {
@@ -597,7 +657,7 @@ export function mergeFresh(cfg, draft, prev) {
   const added = Object.keys(fresh.locked).filter((k) => !before.has(k)).length;
   Object.assign(draft, {
     toilet: fresh.toilet, spaces: fresh.spaces, locked: fresh.locked, orig: fresh.orig,
-    replaceable: fresh.replaceable, hasMale: fresh.hasMale, hasFemale: fresh.hasFemale, spaceIds: fresh.spaceIds,
+    replaceable: fresh.replaceable, unlocked: fresh.unlocked, reopened: fresh.reopened, hasMale: fresh.hasMale, hasFemale: fresh.hasFemale, spaceIds: fresh.spaceIds,
     freshAt: Date.now(),
   });
   return { ok: true, added, conflicts };
@@ -605,6 +665,8 @@ export function mergeFresh(cfg, draft, prev) {
 
 /** 보완 제출용: 시트 값과 달라진(새로 채운) 칸만 보낸다 (docs/API.md supplement) */
 export function buildSupplementPayload(cfg, draft, nowText) {
+  reopenSkipped(cfg, draft);
+  // 빈칸 채우기: 시트에서 비어 있던 칸(또는 자동 NA라 다시 연 칸)
   const changed = (ctx, it) => {
     const key = `${ctx}:${it.code}`;
     if (draft.locked[key]) return undefined;
@@ -612,30 +674,63 @@ export function buildSupplementPayload(cfg, draft, nowText) {
     if (blank(v) || String(v) === (draft.orig[key] ?? '')) return undefined;
     return v;
   };
+  // 고친 칸: 시트에 값이 있던 칸이 달라짐 ('고치기'로 고쳤거나, 앞 질문을 고쳐 건너뛰게/안 건너뛰게 됨).
+  // 서버는 시트 값이 from 그대로일 때만 바꾼다 (그사이 다른 기기가 고쳤으면 겹친 칸으로 알려 줌)
+  const edited = (ctx, it) => {
+    const key = `${ctx}:${it.code}`;
+    if (!draft.locked[key]) return undefined;
+    if (ctx === TOILET && STRUCTURE_CODES.includes(it.code)) return undefined;
+    const from = draft.orig[key] ?? '';
+    const v = finalValue(cfg, draft, ctx, it.code);
+    const to = blank(v) ? '' : v; // 숫자는 숫자로 (시트에 글자로 들어가지 않도록)
+    if (String(to) === String(normalize(it, from) ?? '') || String(to) === from) return undefined;
+    // 직접 고친 칸이 아니면, 앞 질문이 이번에 바뀌어 건너뛰기가 달라진 경우에만 보낸다
+    // (시트에 원래 어긋난 값이 있어도 보완할 때마다 몰래 NA로 바꾸지 않도록)
+    if (!draft.unlocked?.[key] && !parentChanged(ctx, it)) return undefined;
+    // auto = 앞 답 때문에 같이 바뀐 칸: 서버는 앞 답이 실제로 그렇게 바뀌었을 때만 쓴다
+    const auto = !draft.unlocked?.[key] || !!draft.reopened?.[key] || isSkipped(cfg, draft, ctx, it.code);
+    return auto ? { from, to, auto } : { from, to };
+  };
+  const parentChanged = (ctx, it, depth = 0) => {
+    const rule = it.rule;
+    if (!rule || rule.error || depth > 10) return false;
+    const refCtx = cfg.byCode[rule.ref]?.tab === '화장실' ? TOILET : ctx;
+    const refKey = `${refCtx}:${rule.ref}`;
+    const now = finalValue(cfg, draft, refCtx, rule.ref);
+    return String(blank(now) ? '' : now) !== String(normalize(cfg.byCode[rule.ref], draft.orig[refKey] ?? '') ?? '') || parentChanged(refCtx, cfg.byCode[rule.ref], depth + 1);
+  };
   const replaceNA = (ctx) => cfg.items.filter((it) => draft.replaceable[`${ctx}:${it.code}`]).map((it) => it.var);
   const toilet = {};
+  const edits = {};
   for (const it of cfg.items.filter((i) => i.tab === '화장실')) {
     const v = changed(TOILET, it);
     if (v !== undefined) toilet[it.var] = v;
+    const e = edited(TOILET, it);
+    if (e) edits[it.var] = e;
   }
   const spaces = [];
   for (const sp of allSpaces(draft)) {
     const spaceId = draft.spaceIds[sp.key];
     if (!spaceId) continue;
     const values = {};
+    const spEdits = {};
     for (const it of cfg.items.filter((i) => appliesTo(i, sp.kind))) {
       const v = changed(sp.key, it);
       if (v !== undefined) values[it.var] = v;
+      const e = edited(sp.key, it);
+      if (e) spEdits[it.var] = e;
     }
-    if (Object.keys(values).length) spaces.push({ spaceId, values, replaceNA: replaceNA(sp.key) });
+    if (Object.keys(values).length || Object.keys(spEdits).length) spaces.push({ spaceId, values, edits: spEdits, replaceNA: replaceNA(sp.key) });
   }
-  const count = Object.keys(toilet).length + spaces.reduce((n, s) => n + Object.keys(s.values).length, 0);
+  const filledCount = Object.keys(toilet).length + spaces.reduce((n, s) => n + Object.keys(s.values).length, 0);
+  const editCount = Object.keys(edits).length + spaces.reduce((n, s) => n + Object.keys(s.edits).length, 0);
+  const count = filledCount + editCount;
   return {
     payload: {
       action: 'supplement', clientId: draft.localId, id: draft.serverId, round: draft.round,
-      meta: { 입력시각: nowText, 조사자: draft.surveyor }, toilet, replaceNA: replaceNA(TOILET), spaces,
+      meta: { 입력시각: nowText, 조사자: draft.surveyor }, toilet, edits, replaceNA: replaceNA(TOILET), spaces,
     },
-    count,
+    count, filledCount, editCount,
   };
 }
 
