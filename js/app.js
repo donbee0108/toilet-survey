@@ -83,14 +83,15 @@ async function loadConfig({ force = false } = {}) {
 // ---------- 배정 목록 ----------
 async function loadAssignments() {
   const cached = await kv.get('assignments');
-  if (cached) state.assignments = cached.items;
-  if (!navigator.onLine || !apiUrl()) return;
+  if (cached) { state.assignments = cached.items; state.assignmentsReady = true; }
+  if (!navigator.onLine || !apiUrl()) { state.assignmentsReady = true; return; }
   try {
     const res = await call('assignments');
     state.assignments = res.items || [];
     await kv.set('assignments', { items: state.assignments, fetchedAt: Date.now() });
-    if (state.view === 'home') renderHome();
   } catch { /* 예전 서버(배정 기능 없음)거나 끊김 — 저장된 목록을 씀 */ }
+  state.assignmentsReady = true;
+  if (state.view === 'home') renderHome();
 }
 
 function todayText() {
@@ -116,6 +117,7 @@ const currentTeam = () => ls.get('ts.lastTeam');
 function teamHtml(allDrafts) {
   const items = state.assignments || [];
   const team = currentTeam();
+  if (!items.length && !state.assignmentsReady) return '<h2 class="sec">오늘 활동하는 조</h2><p class="hint">배정 목록을 불러오는 중입니다…</p>';
   if (!items.length) {
     const teams = Array.from({ length: 10 }, (_, k) => String(k + 1));
     if (team && !teams.includes(team)) teams.push(team);
