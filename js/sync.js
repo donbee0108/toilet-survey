@@ -5,6 +5,9 @@ import { call } from './api.js';
 import { blobToBase64 } from './photo.js';
 
 const RETRY_MS = 60000;
+// 서버가 다른 저장을 처리하느라 바쁘다는 답: 실패가 아니라 '잠시 뒤 다시'. 보내는 중으로 두고 곧 다시 보낸다
+const BUSY_RE = /다른 저장이 진행 중|서버 응답이 너무 늦습니다/;
+let busyTimer = null;
 let running = false;
 const listeners = new Set();
 
@@ -70,6 +73,14 @@ export async function processQueue() {
     const list = (await drafts.all()).filter((d) => SENDABLE.includes(d.status)).sort((a, b) => a.queuedAt - b.queuedAt);
     for (const d of list) {
       try { await sendDraft(d); } catch (e) {
+        if (BUSY_RE.test(e.message)) {
+          // 사진 단계였으면 사진부터 이어서, 아니면 처음부터 (서버가 같은 조사를 두 번 저장하지 않음)
+          d.status = d.serverId ? 'photos' : 'queued'; d.error = '';
+          await drafts.put(d); emit();
+          clearTimeout(busyTimer);
+          busyTimer = setTimeout(() => processQueue(), 5000 + Math.random() * 15000); // 여럿이 한꺼번에 다시 몰리지 않게 흩어서
+          break;
+        }
         d.status = 'failed'; d.error = e.message;
         await drafts.put(d); emit();
         if (/비밀번호/.test(e.message)) break;
