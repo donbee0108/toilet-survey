@@ -139,14 +139,14 @@ function teamChipsHtml(teams, team, activeToday) {
   }
   return `<h2 class="sec">오늘 활동하는 조를 눌러 주세요</h2>
     <div class="team-chips">${teams.map((t) => `<button class="team-chip ${t === team ? 'on' : ''} ${activeToday.has(t) ? 'today' : ''}" data-team="${esc(t)}" aria-pressed="${t === team}">${esc(teamLabel(t))}</button>`).join('')}</div>
-    <p class="hint cal-legend">${activeToday.size ? '노란 조 = 오늘 배정이 있는 조 · ' : ''}고른 조가 조사자로 기록됩니다</p>`;
+    <p class="hint cal-legend">${activeToday.size ? '노란 조 = 오늘 활동이 있는 조 · ' : ''}고른 조가 조사자로 기록됩니다</p>`;
 }
 
 /** 처음 화면: 조 버튼 → 그 조의 한 주 달력(배정된 날 표시, 오늘이 먼저 골라짐) → 고른 날의 화장실 목록. 배정이 없으면 1~10조 버튼만 */
 function teamHtml(allDrafts) {
   const items = state.assignments || [];
   const team = currentTeam();
-  if (!items.length && !state.assignmentsReady) return '<h2 class="sec">오늘 활동하는 조</h2><p class="hint">배정 목록을 불러오는 중입니다…</p>';
+  if (!items.length && !state.assignmentsReady) return '<h2 class="sec">오늘 활동하는 조</h2><p class="hint">활동 목록을 불러오는 중입니다…</p>';
   if (!items.length) {
     const teams = Array.from({ length: 10 }, (_, k) => String(k + 1));
     if (team && !teams.includes(team)) teams.push(team);
@@ -193,9 +193,9 @@ function teamHtml(allDrafts) {
         const allDone = s && s.done === s.n;
         const mark = !s ? '' : !allDone ? `${s.n}곳` : s.blank ? '빈칸' : '✓';
         const cls = ['cal-day', s ? 'has' : '', allDone && !s.blank ? 'all-done' : '', allDone && s.blank ? 'has-blank' : '', d === today ? 'today' : '', d === date ? 'on' : ''].filter(Boolean).join(' ');
-        return `<button class="${cls}" data-day="${d}" aria-pressed="${d === date}" aria-label="${esc(dateLabel(d))}${s ? ` 배정 ${s.n}곳${s.blank ? `, 빈칸 남은 곳 ${s.blank}곳` : ''}` : ''}"><span>${Number(d.slice(8))}</span>${mark ? `<small>${mark}</small>` : ''}</button>`;
+        return `<button class="${cls}" data-day="${d}" aria-pressed="${d === date}" aria-label="${esc(dateLabel(d))}${s ? ` 활동 ${s.n}곳${s.blank ? `, 빈칸 남은 곳 ${s.blank}곳` : ''}` : ''}"><span>${Number(d.slice(8))}</span>${mark ? `<small>${mark}</small>` : ''}</button>`;
       }).join('')}</div>
-      <p class="hint cal-legend">노란 날 = ${esc(teamLabel(team))} 배정일 · 초록 ✓ = 다 끝남 · 주황 = 빈칸 남음 · 굵은 테두리 = 오늘${week.includes(today) ? '' : ' <button class="linklike" id="wtoday">오늘로 돌아가기</button>'}</p>
+      <p class="hint cal-legend">노란 날 = ${esc(teamLabel(team))} 활동일 · 초록 ✓ = 다 끝남 · 주황 = 빈칸 남음 · 굵은 테두리 = 오늘${week.includes(today) ? '' : ' <button class="linklike" id="wtoday">오늘로 돌아가기</button>'}</p>
     </div>`;
   const list = teamItems.filter((a) => a.date === date);
   const mine = list.length ? { list } : null;
@@ -203,7 +203,7 @@ function teamHtml(allDrafts) {
     ${mine ? `<div class="team-group">
       <h3 class="team-title">${esc(dateLabel(date))} ${esc(teamLabel(team))} 목록 <span class="sub">${mine.list.length}곳</span></h3>
       ${mine.list.map((a) => assignCardHtml(a, allDrafts)).join('')}</div>`
-      : `<p class="hint">${esc(dateLabel(date))}에는 ${esc(teamLabel(team))}에 배정된 화장실이 없습니다. 달력에서 노란 날을 눌러 보세요.</p>`}`;
+      : `<p class="hint">${esc(dateLabel(date))}에는 ${esc(teamLabel(team))} 활동이 없습니다. 달력에서 노란 날을 눌러 보세요.</p>`}`;
 }
 
 /** 배정 카드 한 장: 이름·주소 + 상태 + 지금 할 일. 이 화장실의 휴대폰 기록(입력·보완·전송)은 모두 이 카드에만 */
@@ -1136,7 +1136,7 @@ async function main() {
 main().catch((e) => {
   $app.innerHTML = `<div class="alert">앱을 시작하지 못했습니다: ${esc(e?.message || String(e))}</div>
     <button class="btn primary big" id="retry">다시 시도</button>
-    <button class="btn big" id="softreset">조 선택·배정 목록을 지우고 다시 시도</button>
+    <button class="btn big" id="softreset">조 선택·활동 목록을 지우고 다시 시도</button>
     <p class="hint">조사하던 내용과 사진은 지워지지 않습니다. 그래도 안 되면 이 화면을 캡처해서 관리자에게 보내 주세요.</p>
     <pre class="diag">${esc(String(e?.stack || '').split(/\r?\n/).slice(0, 8).join(' | '))}</pre>`;
   document.getElementById('retry').onclick = () => location.reload();

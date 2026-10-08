@@ -763,7 +763,7 @@ export function draftFromAssignment(a, { surveyor = '' } = {}) {
   d.assignId = a.id;
   d.assignTeam = a.team;
   d.assignDate = a.date;
-  d.prefillLabel = '배정 목록 값';
+  d.prefillLabel = '활동 목록 값';
   const addr = (a.road && a.road !== '-') ? a.road : (a.lot || '');
   if (a.name) { d.toilet.B0a = a.name; d.prefilled['t:B0a'] = true; }
   if (addr) { d.toilet.B0b = addr; d.prefilled['t:B0b'] = true; }
