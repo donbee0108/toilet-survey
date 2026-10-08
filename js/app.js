@@ -825,7 +825,7 @@ function openToc() {
   let group = null;
   const rows = state.pages.map((p) => {
     const g = p.spaceLabel || (p.type === 'items' || p.type === 'presence' ? '화장실 전체' : '');
-    const head = g && g !== group ? `<h3 class="toc-group">${esc(g)}</h3>` : '';
+    const head = g && g !== group ? `<h3 class="toc-group ${p.spaceLabel ? bannerClass(p.ctx) : ''}">${esc(g)}</h3>` : '';
     if (g) group = g;
     const st = L.pageStats(state.cfg, d, p);
     const stat = st ? `<span class="toc-stat ${st.answered === st.total ? 'done' : ''}">${st.answered}/${st.total}</span>${st.missingRequired ? `<span class="toc-req">필수 ${st.missingRequired}</span>` : ''}` : '';
