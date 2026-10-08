@@ -874,7 +874,7 @@ function startHtml() {
     : `<p class="big-text">현재 위치: ${esc(gps)}</p>
     <button class="btn" id="gps">위치 다시 잡기</button>
     <p class="hint">화장실 입구 앞에서 위치를 잡으면 좋습니다.</p></div>`}
-    <div class="card"><p>답을 누르면 바로 휴대폰에 저장됩니다. 앱을 닫아도 처음 화면의 "이어서 하기"에서 계속할 수 있습니다.</p>
+    <div class="card"><p>답을 누르면 바로 휴대폰에 저장됩니다. 앱을 닫아도 처음 화면 목록에서 그 화장실을 누르면 이어서 할 수 있습니다.</p>
     <p>어느 질문에서든 <b>📷 사진</b> 버튼으로 사진을 찍을 수 있습니다.</p>
     <p>순서대로 하기 어려우면 화면 위 <b>"목차"</b>를 눌러 원하는 곳으로 바로 갈 수 있습니다.</p></div>`;
 }
@@ -976,7 +976,7 @@ function reviewHtml(draftPhotos) {
       <button class="btn primary big" id="submit">보완 제출</button>
       <p class="hint">빈칸은 채우고, ✏️ 고치기로 고친 칸은 새 값으로 바꿉니다. 그사이 다른 기기가 같은 칸을 먼저 고쳤으면 그 칸은 바꾸지 않고 알려 드립니다.</p>`
     : `<button class="btn primary big" id="submit">제출하기</button>
-    <p class="hint">제출하면 전송 대기열에 들어가고, 인터넷이 연결되면 자동으로 보냅니다. 제출한 뒤에도 빈칸은 처음 화면의 "빈칸 보완하기"로 채울 수 있습니다.</p>`}`;
+    <p class="hint">제출하면 휴대폰에 먼저 저장되고, 인터넷이 연결되면 자동으로 보냅니다. 제출한 뒤에도 빈칸은 처음 화면의 "마저 해야 할 화장실"이나 "지난 조사 보기·고치기"에서 채울 수 있습니다.</p>`}`;
 }
 
 function markTouched(ctx, code) {
@@ -1102,7 +1102,7 @@ async function submit() {
   // 장애인 화장실 개수를 줄여 없어진 칸의 사진은 올리지 않는다
   const orphan = (await photos.byDraft(d.localId)).filter((p) => p.spaceKey && !spaceKeys.includes(p.spaceKey));
   const ok = await confirmBox('제출할까요?', `${missing.length ? `<p>비어 있는 필수 항목이 <b>${missing.length}개</b> 있습니다. 비어 있는 채로 제출하면 '조사 안 함'으로 저장됩니다.</p>` : ''}
-    ${orphan.length ? `<p>지금은 없는 칸에서 찍은 사진 ${orphan.length}장은 올리지 않고 지웁니다.</p>` : ''}<p>제출한 뒤에는 빈칸만 "빈칸 보완하기"로 채울 수 있습니다.</p>`, '제출', '취소');
+    ${orphan.length ? `<p>지금은 없는 칸에서 찍은 사진 ${orphan.length}장은 올리지 않고 지웁니다.</p>` : ''}<p>제출한 뒤에도 "지난 조사 보기·고치기"에서 빈칸을 채우거나 답을 고칠 수 있습니다.</p>`, '제출', '취소');
   if (!ok) return;
   for (const p of orphan) await photos.remove(p.photoId);
   delete payload.password;
