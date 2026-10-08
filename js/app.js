@@ -170,9 +170,13 @@ function teamHtml(allDrafts) {
   const week = L.weekDays(state.calWeek || date);
   const byDate = new Map();
   for (const a of teamItems) {
-    const s = byDate.get(a.date) || { n: 0, done: 0 };
+    const s = byDate.get(a.date) || { n: 0, done: 0, blank: 0 };
     s.n++;
-    if (L.assignmentStatus(a, allDrafts).kind === 'done') s.done++;
+    const st = L.assignmentStatus(a, allDrafts);
+    if (st.kind === 'done') {
+      s.done++;
+      if ((st.missing ?? toiletMissing(st.tid)) > 0) s.blank++; // 다녀왔지만 빈칸이 남은 곳
+    }
     byDate.set(a.date, s);
   }
   const md = (d) => `${Number(d.slice(5, 7))}월 ${Number(d.slice(8))}일`;
@@ -185,10 +189,13 @@ function teamHtml(allDrafts) {
       <div class="cal-grid">${DOW.map((w) => `<div class="cal-dow">${w}</div>`).join('')}
       ${week.map((d) => {
         const s = byDate.get(d);
-        const cls = ['cal-day', s ? 'has' : '', s && s.done === s.n ? 'all-done' : '', d === today ? 'today' : '', d === date ? 'on' : ''].filter(Boolean).join(' ');
-        return `<button class="${cls}" data-day="${d}" aria-pressed="${d === date}" aria-label="${esc(dateLabel(d))}${s ? ` 배정 ${s.n}곳` : ''}"><span>${Number(d.slice(8))}</span>${s ? `<small>${s.done === s.n ? '✓' : `${s.n}곳`}</small>` : ''}</button>`;
+        // 모두 다녀왔으면: 빈칸 없으면 초록 ✓, 빈칸 남은 곳이 있으면 주황 '빈칸'
+        const allDone = s && s.done === s.n;
+        const mark = !s ? '' : !allDone ? `${s.n}곳` : s.blank ? '빈칸' : '✓';
+        const cls = ['cal-day', s ? 'has' : '', allDone && !s.blank ? 'all-done' : '', allDone && s.blank ? 'has-blank' : '', d === today ? 'today' : '', d === date ? 'on' : ''].filter(Boolean).join(' ');
+        return `<button class="${cls}" data-day="${d}" aria-pressed="${d === date}" aria-label="${esc(dateLabel(d))}${s ? ` 배정 ${s.n}곳${s.blank ? `, 빈칸 남은 곳 ${s.blank}곳` : ''}` : ''}"><span>${Number(d.slice(8))}</span>${mark ? `<small>${mark}</small>` : ''}</button>`;
       }).join('')}</div>
-      <p class="hint cal-legend">노란 날 = ${esc(teamLabel(team))} 배정일 · 초록 ✓ = 모두 제출 · 굵은 테두리 = 오늘${week.includes(today) ? '' : ' <button class="linklike" id="wtoday">오늘로 돌아가기</button>'}</p>
+      <p class="hint cal-legend">노란 날 = ${esc(teamLabel(team))} 배정일 · 초록 ✓ = 다 끝남 · 주황 = 빈칸 남음 · 굵은 테두리 = 오늘${week.includes(today) ? '' : ' <button class="linklike" id="wtoday">오늘로 돌아가기</button>'}</p>
     </div>`;
   const list = teamItems.filter((a) => a.date === date);
   const mine = list.length ? { list } : null;
@@ -222,7 +229,7 @@ function assignCardHtml(a, allDrafts) {
   } else if (st.kind === 'done') {
     const miss = st.missing ?? toiletMissing(st.tid);
     if (miss > 0) {
-      chip = `<span class="status s-a-editing">빈칸 ${miss}개</span>`;
+      chip = `<span class="status s-blank">빈칸 ${miss}개</span>`;
       todo = '<div class="todo">▶ 눌러서 빈칸 채우기</div>';
     }
   }
@@ -276,7 +283,7 @@ function todoListHtml() {
   const seen = new Set(state.shownKeys);
   const team = currentTeam();
   const fillCard = (name, sub, tid, miss) => `<button class="card pick assign" data-fill="${esc(tid)}">
-    <div class="row"><b class="grow">${esc(name)}</b><span class="status s-a-editing">빈칸 ${miss}개</span></div>
+    <div class="row"><b class="grow">${esc(name)}</b><span class="status s-blank">빈칸 ${miss}개</span></div>
     ${sub ? `<div class="sub">${sub}</div>` : ''}<div class="todo">▶ 눌러서 빈칸 채우기</div></button>`;
   // 1) 이 휴대폰에서 하다 만 것·전송 실패
   for (const g of state.groups.values()) {
@@ -491,7 +498,7 @@ async function renderResurvey(mode = 'resurvey') {
     const suppOpen = new Set(all.filter((d) => d.mode === 'supplement' && d.status === 'editing').map((d) => d.serverId));
     listEl.innerHTML = rows.length ? rows.map((t) => {
       const chip = suppOpen.has(t.id) ? '<span class="status s-a-editing">보완 중</span>'
-        : t.missing > 0 ? `<span class="status s-a-editing">빈칸 ${t.missing}개</span>`
+        : t.missing > 0 ? `<span class="status s-blank">빈칸 ${t.missing}개</span>`
           : t.missing === 0 ? '<span class="status s-a-done">다 채움</span>' : '';
       return `<button class="card pick" data-id="${esc(t.id)}">
       <div class="row"><b class="grow">${esc(t.name)}</b>${chip}</div><div class="sub">${esc(t.address)} ${esc(t.floor)} · ${esc(String(t.time).slice(0, 10))} 조사</div></button>`;
