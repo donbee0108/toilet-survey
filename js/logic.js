@@ -811,6 +811,46 @@ export function weekDays(date) {
   return Array.from({ length: 7 }, (_, i) => shiftDays(sun, i));
 }
 
+/**
+ * 이 휴대폰의 조사 기록(처음 조사·다시 조사·보완)을 화장실 하나당 한 묶음으로.
+ * 키: 배정에서 시작했으면 'A:배정번호', 아니면 'T:화장실번호'(제출·재조사·보완), 아직 번호가 없으면 'L:기록번호'.
+ * 보완·재조사도 그 화장실번호가 배정에서 나온 것이면 그 배정 묶음으로 들어간다.
+ */
+export function groupByToilet(allDrafts, assignments = []) {
+  const tidToAssign = {};
+  for (const a of assignments) for (const x of a.done || []) tidToAssign[x.tid] = a.id;
+  for (const d of allDrafts) if (d.assignId && d.serverId && !tidToAssign[d.serverId]) tidToAssign[d.serverId] = d.assignId;
+  const groups = new Map();
+  for (const d of allDrafts) {
+    const tid = d.serverId || d.resurveyOf || '';
+    const aid = d.assignId || (tid && tidToAssign[tid]) || '';
+    const key = aid ? `A:${aid}` : tid ? `T:${tid}` : `L:${d.localId}`;
+    if (!groups.has(key)) groups.set(key, { key, assignId: aid, tid: '', drafts: [] });
+    const g = groups.get(key);
+    g.drafts.push(d);
+    if (!g.tid && d.serverId) g.tid = d.serverId;
+  }
+  for (const g of groups.values()) g.drafts.sort((x, y) => (y.updatedAt || 0) - (x.updatedAt || 0));
+  return groups;
+}
+
+/**
+ * 묶음 하나의 상태: 무엇을 해야 하는지 한 가지로.
+ * failed(전송 실패) > editing(입력 중) > supp(보완 중) > sending(보내는 중) > done(보냄)
+ */
+export function groupSummary(g) {
+  const ds = g.drafts;
+  const failed = ds.find((d) => d.status === 'failed');
+  const editing = ds.find((d) => d.status === 'editing' && d.mode !== 'supplement');
+  const supp = ds.find((d) => d.status === 'editing' && d.mode === 'supplement');
+  const sending = ds.find((d) => ['queued', 'sending', 'photos'].includes(d.status));
+  const sent = ds.find((d) => d.mode !== 'supplement' && d.serverId && d.status === 'done');
+  const lastSupp = ds.find((d) => d.mode === 'supplement' && d.status === 'done' && d.result);
+  const kind = failed ? 'failed' : editing ? 'editing' : supp ? 'supp' : sending ? 'sending' : 'done';
+  const named = ds.find((d) => d.toilet?.B0a);
+  return { kind, failed, editing, supp, sending, sent, lastSupp, name: named?.toilet.B0a || '(이름 없음)', tid: g.tid || sent?.serverId || '' };
+}
+
 /** 배정 항목 상태: 이 휴대폰의 조사 기록 + 서버의 제출 기록 */
 export function assignmentStatus(a, localDrafts) {
   const mine = localDrafts.filter((d) => d.assignId === a.id && d.mode !== 'supplement');

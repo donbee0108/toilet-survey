@@ -182,28 +182,66 @@ function teamHtml(allDrafts) {
       : `<p class="hint">${esc(dateLabel(date))}에는 ${esc(teamLabel(team))}에 배정된 화장실이 없습니다. 달력에서 노란 날을 눌러 보세요.</p>`}`;
 }
 
-/** 배정 카드 한 장: 이름·주소 + 상태 + 지금 할 일 (이어서 하기·전송 상태·보완 중을 카드에 모음) */
+/** 배정 카드 한 장: 이름·주소 + 상태 + 지금 할 일. 이 화장실의 휴대폰 기록(입력·보완·전송)은 모두 이 카드에만 */
 function assignCardHtml(a, allDrafts) {
+  state.shownKeys.add(`A:${a.id}`);
   const st = L.assignmentStatus(a, allDrafts);
-  const mine = allDrafts.filter((d) => d.assignId === a.id && d.mode !== 'supplement').sort((x, y) => y.updatedAt - x.updatedAt);
-  const sending = mine.find((d) => ['queued', 'sending', 'photos', 'failed'].includes(d.status));
-  const supp = st.tid ? allDrafts.find((d) => d.mode === 'supplement' && d.status === 'editing' && d.serverId === st.tid) : null;
-  for (const d of [...mine, ...(supp ? [supp] : [])]) state.shownDrafts.add(d.localId);
+  const g = state.groups?.get(`A:${a.id}`);
+  const sum = g ? L.groupSummary(g) : null;
   let chip = `<span class="status s-a-${st.kind}">${ASSIGN_TEXT[st.kind]}${st.tid ? ` ${esc(st.tid)}` : ''}</span>`;
   let todo = '';
-  if (st.kind === 'editing') {
+  if (sum?.kind === 'failed') {
+    chip = '<span class="status s-failed">전송 실패</span>';
+    todo = `<div class="err">${esc(sum.failed.error || '보내지 못했습니다')} — 위 "지금 다시 보내기"를 눌러 주세요.</div>`;
+  } else if (st.kind === 'editing') {
     const left = state.cfg ? L.missingAll(state.cfg, st.draft).length : 0;
     todo = `<div class="todo">▶ 눌러서 이어서 하기${left ? ` · 필수 ${left}개 남음` : ' · 필수 모두 입력함'}</div>`;
-  } else if (sending) {
-    chip = `<span class="status s-${sending.status}">${STATUS_TEXT[sending.status]}</span>`;
-    todo = sending.status === 'failed' ? `<div class="err">${esc(sending.error || '전송 실패')} — 위 "지금 다시 보내기"를 눌러 주세요.</div>`
-      : `<div class="sub">${navigator.onLine ? '보내는 중입니다.' : '인터넷이 연결되면 자동으로 보냅니다.'}</div>`;
-  } else if (supp) {
-    todo = '<div class="todo">▶ 보완 중 · 눌러서 이어서 하기</div>';
+  } else if (sum?.kind === 'supp') {
+    chip = `<span class="status s-a-editing">보완 중${st.tid ? ` ${esc(st.tid)}` : ''}</span>`;
+    todo = '<div class="todo">▶ 눌러서 보완 이어서 하기</div>';
+  } else if (sum?.kind === 'sending') {
+    chip = `<span class="status s-${sum.sending.status}">${STATUS_TEXT[sum.sending.status]}</span>`;
+    todo = `<div class="sub">${navigator.onLine ? '보내는 중입니다.' : '인터넷이 연결되면 자동으로 보냅니다.'}</div>`;
   }
   return `<button class="card pick assign" data-assign="${esc(a.id)}">
     <div class="row"><b class="grow">${esc(a.name)}</b>${chip}</div>
     <div class="sub">${esc((a.road && a.road !== '-') ? a.road : (a.lot || ''))}${a.memo ? ` · ${esc(a.memo)}` : ''}</div>${todo}</button>`;
+}
+
+/** 조 목록에 안 나온 화장실 한 곳 (이 휴대폰의 기록을 묶어 카드 한 장) */
+function otherCardHtml(g, photoStat) {
+  const m = L.groupSummary(g);
+  const chipText = m.kind === 'sending' ? STATUS_TEXT[m.sending.status] : { failed: '전송 실패', editing: '입력 중', supp: '보완 중', done: '보냄' }[m.kind];
+  const chipCls = { failed: 's-failed', editing: 's-a-editing', supp: 's-a-editing', sending: 's-queued', done: 's-a-done' }[m.kind];
+  const lines = [];
+  if (m.sent) {
+    const ps = photoStat(m.sent.localId);
+    lines.push(`${esc(m.sent.serverId)} ${m.sent.round}차 제출 ${dateText(m.sent.queuedAt)}${ps.total ? ` · 사진 ${ps.done}/${ps.total}장` : ''}`);
+  }
+  if (m.lastSupp?.result) {
+    const r = m.lastSupp.result;
+    lines.push(`최근 보완: ${r.filled}칸 채움${r.edited ? ` · ${r.edited}칸 고침` : ''}`);
+  }
+  const errs = [];
+  if (m.failed) errs.push(`${esc(m.failed.error || '보내지 못했습니다')} — 위 "지금 다시 보내기"를 눌러 주세요.`);
+  if (m.lastSupp?.result?.conflicts?.length) errs.push(`다른 기기가 먼저 고쳐서 못 고친 칸 ${m.lastSupp.result.conflicts.length}개 — 보완을 다시 열어 확인해 주세요.`);
+  if (m.lastSupp?.result?.editsIgnored) errs.push(`고친 칸 ${m.lastSupp.result.editsIgnored}개가 반영되지 않았습니다 — 관리자에게 알려 주세요.`);
+  for (const d of g.drafts) if (d.warnings?.length) errs.push(`시트에 열이 없어 저장되지 않은 값: ${esc(d.warnings.join(', '))} — 관리자에게 알려 주세요.`);
+  let actions = '';
+  if (m.editing) {
+    lines.push(`${m.editing.resurveyOf ? '다시 조사' : '조사'} 입력 중 · ${dateText(m.editing.updatedAt)} 저장 — 끝나면 "제출하기"를 눌러 주세요`);
+    actions = `<button class="btn primary" data-open="${m.editing.localId}">이어서</button><button class="btn danger small" data-del="${m.editing.localId}">삭제</button>`;
+  } else if (m.supp) {
+    lines.push(`보완 입력 중 · ${dateText(m.supp.updatedAt)} 저장 — 끝나면 "보완 제출"을 눌러 주세요`);
+    actions = `<button class="btn primary" data-open="${m.supp.localId}">보완 이어서</button><button class="btn danger small" data-del="${m.supp.localId}">삭제</button>`;
+  } else if (m.kind === 'done' && m.sent?.submission) {
+    actions = `<button class="btn" data-supp="${m.sent.localId}">보완하기</button>`;
+  }
+  return `<div class="card other">
+    <div class="row"><b class="grow">${esc(m.name)}</b><span class="status ${chipCls}">${chipText}</span></div>
+    ${lines.map((t) => `<div class="sub">${t}</div>`).join('')}
+    ${errs.map((t) => `<div class="err">${t}</div>`).join('')}
+    ${actions ? `<div class="row gap actions">${actions}</div>` : ''}</div>`;
 }
 
 async function openAssignment(id) {
@@ -247,13 +285,15 @@ async function renderHome() {
     const ps = allPhotos.filter((p) => p.localId === id);
     return { total: ps.length, done: ps.filter((p) => p.status === 'done').length };
   };
-  const sent = all.filter((d) => d.status !== 'editing');
   const failedN = all.filter((d) => d.status === 'failed').length;
   const sendingN = all.filter((d) => ['queued', 'sending', 'photos'].includes(d.status)).length;
-  state.shownDrafts = new Set(); // 조 목록 카드에 나온 조사 (아래에 다시 보이지 않게)
+  // 한 화장실은 첫 화면에 한 번만: 기록을 화장실 단위로 묶고, 조 목록 카드에 나온 화장실은 아래에서 뺀다
+  state.groups = L.groupByToilet(all, state.assignments || []);
+  state.shownKeys = new Set();
   const teamPart = state.cfg ? teamHtml(all) : '';
-  // 목록 카드에 안 나온 입력 중 조사 (목록에 없는 화장실, 다른 날짜·조, 보완)
-  const editing = all.filter((d) => d.status === 'editing' && !state.shownDrafts.has(d.localId));
+  const others = [...state.groups.values()].filter((g) => !state.shownKeys.has(g.key));
+  const othersActive = others.filter((g) => L.groupSummary(g).kind !== 'done');
+  const othersDone = others.filter((g) => L.groupSummary(g).kind === 'done');
   const needsPw = !!state.needPw;
   const noUrl = !apiUrl() || apiUrl().includes('여기에');
   const info = state.cfgInfo;
@@ -282,37 +322,22 @@ async function renderHome() {
 
     ${teamPart}
 
-    ${(state.assignments || []).length ? '<h2 class="sec">목록에 없는 화장실</h2>' : (editing.length ? '<h2 class="sec">이어서 하기</h2>' : '')}
-    ${editing.length ? `${editing.map((d) => `<div class="card row">
-        <div class="grow"><b>${esc(d.toilet.B0a || '(이름 없음)')}</b>${modeTag(d)}
-          <div class="sub">${esc(d.surveyor)} · ${dateText(d.updatedAt)} 저장</div></div>
-        <button class="btn primary" data-open="${d.localId}">이어서</button>
-        <button class="btn danger small" data-del="${d.localId}" aria-label="삭제">삭제</button></div>`).join('')}` : ''}
+    ${othersActive.length ? `<h2 class="sec">${(state.assignments || []).length ? '그 밖의 화장실' : '하던 조사'} <span class="sub">아직 안 끝남</span></h2>
+      ${othersActive.map((g) => otherCardHtml(g, photoStat)).join('')}` : ''}
+    ${(state.assignments || []).length ? '<h2 class="sec">목록에 없는 화장실</h2>' : ''}
     <button class="btn primary big" id="new" ${state.cfg ? '' : 'disabled'}>새 조사 시작</button>
     <button class="btn big" id="supplement" ${state.cfg ? '' : 'disabled'}>제출한 조사 보완</button>
     ${!state.cfg && !needsPw ? '<p class="hint">조사 항목을 불러와야 시작할 수 있습니다. 인터넷에 연결한 뒤 아래 "설정·정보 → 조사 항목 새로 불러오기"를 눌러 주세요.</p>' : ''}
 
-    ${sent.length ? `<details class="card history" ${failedN ? 'open' : ''}><summary>이 휴대폰의 전송 기록 (${sent.length})</summary>
-      ${sent.map((d) => {
-        const ps = photoStat(d.localId);
-        const supp = d.mode === 'supplement';
-        const canSupplement = !supp && d.status === 'done' && d.submission && d.serverId;
-        return `<div class="card row">
-          <div class="grow"><b>${esc(d.toilet.B0a || '(이름 없음)')}</b> ${d.serverId ? `<span class="tag">${supp ? '보완 · ' : ''}${esc(d.serverId)} · ${d.round}차</span>` : ''}
-            <div class="sub">${dateText(d.queuedAt)} ${supp ? '보완 제출' : '제출'} · 사진 ${ps.done}/${ps.total}장</div>
-            ${supp && d.result ? `<div class="sub">${d.result.filled}칸 채움${d.result.edited ? ` · ${d.result.edited}칸 고침` : ''}${d.result.skipped?.length ? ` · 이미 값이 있어 그대로 둔 칸 ${d.result.skipped.length}개` : ''}</div>${d.result.conflicts?.length ? `<div class="err">다른 기기가 먼저 고쳐서 못 고친 칸 ${d.result.conflicts.length}개 — 보완을 다시 열어 확인해 주세요.</div>` : ''}${d.result.editsIgnored ? `<div class="err">고친 칸 ${d.result.editsIgnored}개가 반영되지 않았습니다 — 관리자에게 알려 주세요(서버 Code.gs 새 버전 배포 필요).</div>` : ''}` : ''}
-            ${canSupplement ? `<button class="btn small" data-supp="${d.localId}">빈칸 보완하기</button>` : ''}
-            ${d.error ? `<div class="err">${esc(d.error)}</div>` : ''}
-            ${d.warnings?.length ? `<div class="err">시트에 열이 없어 저장되지 않은 값: ${esc(d.warnings.join(', '))} — 관리자에게 알려 주세요.</div>` : ''}</div>
-          <span class="status s-${d.status}">${STATUS_TEXT[d.status] || d.status}</span></div>`;
-      }).join('')}
-      <div class="row gap">
-        <button class="btn" id="clean">완료된 기록 정리</button></div></details>` : ''}
+    ${othersDone.length ? `<details class="card history"><summary>이 휴대폰으로 보낸 화장실 ${othersDone.length}곳</summary>
+      ${othersDone.map((g) => otherCardHtml(g, photoStat)).join('')}</details>` : ''}
 
     <details class="card"><summary>설정·정보</summary>
       <p>조사 항목: ${info ? `${esc(info.version)} · ${info.count}개 · ${dateText(info.fetchedAt)} 불러옴${info.fromCache ? ' (기기에 저장된 사본)' : ''}` : '없음'}</p>
       <button class="btn" id="reload">조사 항목 새로 불러오기</button>
       <button class="btn" id="resetpw">비밀번호 다시 입력</button>
+      <button class="btn" id="clean">완료된 기록 정리</button>
+      <p class="hint">"완료된 기록 정리"는 다 보낸 조사를 이 휴대폰에서만 지웁니다. 시트에는 그대로 남습니다.</p>
     </details>
   </main>`;
 
@@ -376,7 +401,7 @@ async function renderHome() {
 
 // ---------- 재조사 목록 ----------
 function modeTag(d) {
-  if (d.mode === 'supplement') return ` <span class="tag">보완 ${esc(d.serverId)} · ${d.round}차</span>`;
+  if (d.mode === 'supplement') return ` <span class="tag">보완 중 · ${esc(d.serverId)} ${d.round}차</span>`;
   if (d.resurveyOf) return ` <span class="tag">재조사 ${esc(d.resurveyOf)}</span>`;
   return '';
 }
@@ -492,6 +517,9 @@ async function startSupplementFromLocal(localId) {
 
 async function beginSupplement(rows, { fromServer = false } = {}) {
   if (!(Number(rows.round) >= 1)) { toast('이 화장실의 조사차수를 알 수 없어 보완할 수 없습니다. 관리자에게 알려 주세요.'); return; }
+  // 같은 화장실을 이미 보완하던 중이면 새로 만들지 않고 그걸 연다 (같은 보완이 두 개 생기지 않게)
+  const open = (await drafts.all()).find((x) => x.mode === 'supplement' && x.status === 'editing' && x.serverId === rows.id);
+  if (open) { toast('하던 보완을 이어서 엽니다.'); return openDraft(open.localId); }
   const d = L.supplementFromRows(state.cfg, L.newDraft({ surveyor: teamLabel(currentTeam()) }), rows);
   if (fromServer) d.freshAt = Date.now(); // 방금 시트에서 불러왔으니 바로 다시 불러오지 않음
   await drafts.put(d);
