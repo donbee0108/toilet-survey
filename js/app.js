@@ -91,9 +91,26 @@ async function loadAssignments() {
     state.assignments = res.items || [];
     await kv.set('assignments', { items: state.assignments, fetchedAt: Date.now() });
   } catch { /* 예전 서버(배정 기능 없음)거나 끊김 — 저장된 목록을 씀 */ }
+  await loadToiletInfo();
   state.assignmentsReady = true;
   if (state.view === 'home') renderHome();
 }
+
+/** 제출된 화장실들의 빈 필수 칸 수 (서버가 셈). '마저 해야 할 화장실'에 씀. 끊겨 있으면 저장된 사본 */
+async function loadToiletInfo() {
+  const cached = await kv.get('toilets');
+  if (Array.isArray(cached?.items)) state.toiletInfo = cached.items;
+  if (!navigator.onLine || !apiUrl()) return;
+  try {
+    const items = (await call('listToilets')).toilets || [];
+    state.toiletInfo = items;
+    await kv.set('toilets', { items, fetchedAt: Date.now() });
+  } catch { /* 저장된 사본을 씀 */ }
+}
+const toiletMissing = (tid) => {
+  const t = (state.toiletInfo || []).find((x) => x.id === tid);
+  return t && typeof t.missing === 'number' ? t.missing : null;
+};
 
 function todayText() {
   const t = new Date();
@@ -202,6 +219,12 @@ function assignCardHtml(a, allDrafts) {
   } else if (sum?.kind === 'sending') {
     chip = `<span class="status s-${sum.sending.status}">${STATUS_TEXT[sum.sending.status]}</span>`;
     todo = `<div class="sub">${navigator.onLine ? '보내는 중입니다.' : '인터넷이 연결되면 자동으로 보냅니다.'}</div>`;
+  } else if (st.kind === 'done') {
+    const miss = st.missing ?? toiletMissing(st.tid);
+    if (miss > 0) {
+      chip = `<span class="status s-a-editing">빈칸 ${miss}개</span>`;
+      todo = '<div class="todo">▶ 눌러서 빈칸 채우기</div>';
+    }
   }
   return `<button class="card pick assign" data-assign="${esc(a.id)}">
     <div class="row"><b class="grow">${esc(a.name)}</b>${chip}</div>
@@ -209,15 +232,12 @@ function assignCardHtml(a, allDrafts) {
 }
 
 /** 조 목록에 안 나온 화장실 한 곳 (이 휴대폰의 기록을 묶어 카드 한 장) */
-function otherCardHtml(g, photoStat) {
+function otherCardHtml(g) {
   const m = L.groupSummary(g);
   const chipText = m.kind === 'sending' ? STATUS_TEXT[m.sending.status] : { failed: '전송 실패', editing: '입력 중', supp: '보완 중', done: '보냄' }[m.kind];
   const chipCls = { failed: 's-failed', editing: 's-a-editing', supp: 's-a-editing', sending: 's-queued', done: 's-a-done' }[m.kind];
   const lines = [];
-  if (m.sent) {
-    const ps = photoStat(m.sent.localId);
-    lines.push(`${esc(m.sent.serverId)} ${m.sent.round}차 제출 ${dateText(m.sent.queuedAt)}${ps.total ? ` · 사진 ${ps.done}/${ps.total}장` : ''}`);
-  }
+  if (m.sent) lines.push(`${dateText(m.sent.queuedAt)} 보냄`);
   if (m.lastSupp?.result) {
     const r = m.lastSupp.result;
     lines.push(`최근 보완: ${r.filled}칸 채움${r.edited ? ` · ${r.edited}칸 고침` : ''}`);
@@ -244,6 +264,53 @@ function otherCardHtml(g, photoStat) {
     ${actions ? `<div class="row gap actions">${actions}</div>` : ''}</div>`;
 }
 
+/**
+ * 첫 화면 '마저 해야 할 화장실': 오늘 목록에 안 나온 화장실 중
+ * - 이 휴대폰에서 하다 만 조사·보완, 전송 실패
+ * - 이 조에 배정돼 다녀왔는데 빈칸이 남은 곳 (서버가 센 빈칸 수)
+ * - 이 휴대폰으로 보낸 목록 밖 화장실 중 빈칸이 남은 곳
+ * 한 화장실은 한 번만.
+ */
+function todoListHtml() {
+  const cards = [];
+  const seen = new Set(state.shownKeys);
+  const team = currentTeam();
+  const fillCard = (name, sub, tid, miss) => `<button class="card pick assign" data-fill="${esc(tid)}">
+    <div class="row"><b class="grow">${esc(name)}</b><span class="status s-a-editing">빈칸 ${miss}개</span></div>
+    ${sub ? `<div class="sub">${sub}</div>` : ''}<div class="todo">▶ 눌러서 빈칸 채우기</div></button>`;
+  // 1) 이 휴대폰에서 하다 만 것·전송 실패
+  for (const g of state.groups.values()) {
+    if (seen.has(g.key)) continue;
+    const sm = L.groupSummary(g);
+    // 마지막 보완이 다 반영되지 못했으면(다른 기기와 겹침·서버 갱신 전) 확인하도록 남겨 둔다
+    const suppTrouble = sm.kind === 'done' && sm.lastSupp === g.drafts[0] && (sm.lastSupp.result?.conflicts?.length || sm.lastSupp.result?.editsIgnored);
+    if (!['failed', 'editing', 'supp'].includes(sm.kind) && !suppTrouble) continue;
+    seen.add(g.key);
+    const a = g.assignId && (state.assignments || []).find((x) => x.id === g.assignId);
+    cards.push(a ? assignCardHtml(a, g.drafts) : otherCardHtml(g));
+  }
+  // 2) 이 조 배정 중 다녀왔는데 빈칸 남은 곳
+  for (const a of state.assignments || []) {
+    const key = `A:${a.id}`;
+    if (seen.has(key) || a.team !== team) continue;
+    const st = L.assignmentStatus(a, state.groups.get(key)?.drafts || []);
+    const miss = st.kind === 'done' ? (st.missing ?? toiletMissing(st.tid)) : null;
+    if (!(miss > 0)) continue;
+    seen.add(key);
+    cards.push(fillCard(a.name, `${esc(dateLabel(a.date))} 조사`, st.tid, miss));
+  }
+  // 3) 이 휴대폰으로 보낸 목록 밖 화장실 중 빈칸 남은 곳
+  for (const g of state.groups.values()) {
+    if (seen.has(g.key)) continue;
+    const m = L.groupSummary(g);
+    const miss = m.kind === 'done' && m.tid ? toiletMissing(m.tid) : null;
+    if (!(miss > 0)) continue;
+    seen.add(g.key);
+    cards.push(fillCard(m.name, '', m.tid, miss));
+  }
+  return cards.join('');
+}
+
 async function openAssignment(id) {
   const a = (state.assignments || []).find((x) => x.id === id);
   if (!a) return;
@@ -253,8 +320,8 @@ async function openAssignment(id) {
   if (st.kind === 'done') {
     const supp = (await drafts.all()).find((d) => d.mode === 'supplement' && d.status === 'editing' && d.serverId === st.tid);
     if (supp) return openDraft(supp.localId);
-    const choice = await modal('이미 제출된 화장실입니다', `<p><b>${esc(a.name)}</b>은(는) ${esc(st.tid)} ${st.round || ''}차로 제출되어 있습니다.</p><p>빈칸만 채우려면 "빈칸 보완", 처음부터 다시 조사하려면 "다시 조사"를 눌러 주세요.</p>`,
-      [{ label: '취소', value: '' }, { label: '다시 조사', value: 're' }, { label: '빈칸 보완', value: 'supp', primary: true }]);
+    const choice = await modal('이미 보낸 화장실입니다', `<p><b>${esc(a.name)}</b></p><p>빈칸을 채우거나 답을 고치려면 <b>"빈칸 채우기·고치기"</b>를 누르세요.</p>`,
+      [{ label: '취소', value: '' }, { label: '처음부터 다시 조사', value: 're' }, { label: '빈칸 채우기·고치기', value: 'supp', primary: true }]);
     if (choice === 'supp') return startSupplementFromServer(st.tid);
     if (choice === 're') {
       if (!(await confirmBox('다시 조사', '<p>기존에 입력된 답변이 모두 삭제됩니다. 다시 시작하시겠습니까?</p>', '다시 시작', '취소'))) return;
@@ -291,9 +358,7 @@ async function renderHome() {
   state.groups = L.groupByToilet(all, state.assignments || []);
   state.shownKeys = new Set();
   const teamPart = state.cfg ? teamHtml(all) : '';
-  const others = [...state.groups.values()].filter((g) => !state.shownKeys.has(g.key));
-  const othersActive = others.filter((g) => L.groupSummary(g).kind !== 'done');
-  const othersDone = others.filter((g) => L.groupSummary(g).kind === 'done');
+  const todoCards = todoListHtml();
   const needsPw = !!state.needPw;
   const noUrl = !apiUrl() || apiUrl().includes('여기에');
   const info = state.cfgInfo;
@@ -322,15 +387,14 @@ async function renderHome() {
 
     ${teamPart}
 
-    ${othersActive.length ? `<h2 class="sec">${(state.assignments || []).length ? '그 밖의 화장실' : '하던 조사'} <span class="sub">아직 안 끝남</span></h2>
-      ${othersActive.map((g) => otherCardHtml(g, photoStat)).join('')}` : ''}
-    ${(state.assignments || []).length ? '<h2 class="sec">목록에 없는 화장실</h2>' : ''}
-    <button class="btn primary big" id="new" ${state.cfg ? '' : 'disabled'}>새 조사 시작</button>
-    <button class="btn big" id="supplement" ${state.cfg ? '' : 'disabled'}>제출한 조사 보완</button>
-    ${!state.cfg && !needsPw ? '<p class="hint">조사 항목을 불러와야 시작할 수 있습니다. 인터넷에 연결한 뒤 아래 "설정·정보 → 조사 항목 새로 불러오기"를 눌러 주세요.</p>' : ''}
+    ${todoCards ? `<h2 class="sec">마저 해야 할 화장실</h2>
+      <p class="hint">빈칸이 남았거나 하다 만 곳입니다. 누르면 이어서 할 수 있습니다.</p>${todoCards}` : ''}
 
-    ${othersDone.length ? `<details class="card history"><summary>이 휴대폰으로 보낸 화장실 ${othersDone.length}곳</summary>
-      ${othersDone.map((g) => otherCardHtml(g, photoStat)).join('')}</details>` : ''}
+    <div class="home-actions">
+      <button class="btn big" id="new" ${state.cfg ? '' : 'disabled'}>➕ 목록에 없는 화장실 조사</button>
+      <button class="btn big" id="supplement" ${state.cfg ? '' : 'disabled'}>📋 지난 조사 보기·고치기</button>
+    </div>
+    ${!state.cfg && !needsPw ? '<p class="hint">조사 항목을 불러와야 시작할 수 있습니다. 인터넷에 연결한 뒤 아래 "설정·정보 → 조사 항목 새로 불러오기"를 눌러 주세요.</p>' : ''}
 
     <details class="card"><summary>설정·정보</summary>
       <p>조사 항목: ${info ? `${esc(info.version)} · ${info.count}개 · ${dateText(info.fetchedAt)} 불러옴${info.fromCache ? ' (기기에 저장된 사본)' : ''}` : '없음'}</p>
@@ -363,6 +427,7 @@ async function renderHome() {
   document.getElementById('changeTeam')?.addEventListener('click', () => { state.pickTeam = true; renderHome(); });
   document.getElementById('new').onclick = () => { if (!needName()) startNew(); };
   document.getElementById('supplement').onclick = () => { if (!needName()) renderResurvey('supplement'); };
+  $app.querySelectorAll('[data-fill]').forEach((b) => { b.onclick = () => { if (!needName()) startSupplementFromServer(b.dataset.fill); }; });
   $app.querySelectorAll('[data-supp]').forEach((b) => { b.onclick = () => { if (!needName()) startSupplementFromLocal(b.dataset.supp); }; });
   $app.querySelectorAll('[data-open]').forEach((b) => { b.onclick = () => openDraft(b.dataset.open); });
   $app.querySelectorAll('[data-del]').forEach((b) => {
@@ -410,26 +475,42 @@ function modeTag(d) {
 async function renderResurvey(mode = 'resurvey') {
   state.view = 'resurvey';
   const supp = mode === 'supplement';
-  $app.innerHTML = `<header class="bar"><button class="btn" id="back">← 처음으로</button><h1 class="bar-title">${supp ? '보완할 화장실' : '다시 조사할 화장실'}</h1></header>
-    <main class="home">${supp ? '<p class="hint">제출된 화장실 목록입니다. 누르면 가장 최근 조사의 <b>빈칸만</b> 채울 수 있습니다. 이미 저장된 값을 고치려면 처음 화면 조 목록에서 그 화장실을 눌러 "다시 조사"를 고르세요.</p>' : ''}
-    <input id="q" class="text-input" placeholder="이름·주소·번호로 찾기" value="${esc(state.search)}">
+  const all = await drafts.all();
+  const unsent = all.filter((d) => ['queued', 'sending', 'photos', 'failed'].includes(d.status) && !d.serverId);
+  $app.innerHTML = `<header class="bar"><button class="btn" id="back">← 처음으로</button><h1 class="bar-title">${supp ? '지난 조사 보기·고치기' : '다시 조사할 화장실'}</h1></header>
+    <main class="home">${supp ? '<p class="hint">보낸 화장실 목록입니다. 화장실을 누르면 <b>빈칸을 채우거나 답을 고칠</b> 수 있습니다.</p>' : ''}
+    ${supp && unsent.length ? `<h2 class="sec">아직 못 보낸 조사</h2>${unsent.map((d) => `<div class="card row"><b class="grow">${esc(d.toilet.B0a || '(이름 없음)')}</b><span class="status s-${d.status}">${STATUS_TEXT[d.status]}</span></div>`).join('')}
+      <p class="hint">인터넷이 되는 곳에서 자동으로 보냅니다. 보낸 뒤에 고칠 수 있습니다.</p><h2 class="sec">보낸 화장실</h2>` : ''}
+    <input id="q" class="text-input" placeholder="이름·주소로 찾기" value="${esc(state.search)}">
     <div id="list"><p class="hint">목록을 불러오는 중…</p></div></main>`;
   document.getElementById('back').onclick = renderHome;
   const listEl = document.getElementById('list');
   const draw = () => {
     const q = state.search.trim();
     const rows = (state.toilets || []).filter((t) => !q || [t.id, t.name, t.address].some((s) => String(s).includes(q)));
-    listEl.innerHTML = rows.length ? rows.map((t) => `<button class="card pick" data-id="${esc(t.id)}">
-      <b>${esc(t.id)} · ${esc(t.name)}</b><div class="sub">${esc(t.address)} ${esc(t.floor)} · ${t.round}차 조사 ${esc(t.time)}</div></button>`).join('')
+    const suppOpen = new Set(all.filter((d) => d.mode === 'supplement' && d.status === 'editing').map((d) => d.serverId));
+    listEl.innerHTML = rows.length ? rows.map((t) => {
+      const chip = suppOpen.has(t.id) ? '<span class="status s-a-editing">보완 중</span>'
+        : t.missing > 0 ? `<span class="status s-a-editing">빈칸 ${t.missing}개</span>`
+          : t.missing === 0 ? '<span class="status s-a-done">다 채움</span>' : '';
+      return `<button class="card pick" data-id="${esc(t.id)}">
+      <div class="row"><b class="grow">${esc(t.name)}</b>${chip}</div><div class="sub">${esc(t.address)} ${esc(t.floor)} · ${esc(String(t.time).slice(0, 10))} 조사</div></button>`;
+    }).join('')
       : '<p class="hint">찾는 화장실이 없습니다.</p>';
     listEl.querySelectorAll('[data-id]').forEach((b) => { b.onclick = () => (supp ? startSupplementFromServer(b.dataset.id) : startResurvey(b.dataset.id)); });
   };
   document.getElementById('q').addEventListener('input', (e) => { state.search = e.target.value; draw(); });
   try {
     state.toilets = (await call('listToilets')).toilets;
+    // 빈칸 남은 곳 먼저, 그다음 최근에 조사한 곳
+    state.toilets.sort((x, y) => ((y.missing > 0) - (x.missing > 0)) || String(y.time).localeCompare(String(x.time)));
     draw();
   } catch (e) {
-    listEl.innerHTML = `<div class="alert">${esc(e.message)} — 목록은 인터넷이 연결된 곳에서 볼 수 있습니다.${supp ? ' 이 휴대폰으로 제출한 조사는 처음 화면 "전송 상태"의 "빈칸 보완하기"로 인터넷 없이도 시작할 수 있습니다.' : ''}</div>`;
+    // 인터넷이 없으면: 이 휴대폰으로 보낸 조사만 (그 기록으로 고치기 시작 가능)
+    const mine = supp ? all.filter((d) => d.mode !== 'supplement' && d.status === 'done' && d.submission && d.serverId) : [];
+    listEl.innerHTML = `<div class="warn">${esc(e.message)} — 전체 목록은 인터넷이 연결된 곳에서 볼 수 있습니다.${mine.length ? ' 아래는 이 휴대폰으로 보낸 조사입니다.' : ''}</div>
+      ${mine.map((d) => `<button class="card pick" data-local="${esc(d.localId)}"><b>${esc(d.toilet.B0a || '(이름 없음)')}</b><div class="sub">${dateText(d.queuedAt)} 보냄</div></button>`).join('')}`;
+    listEl.querySelectorAll('[data-local]').forEach((b) => { b.onclick = () => startSupplementFromLocal(b.dataset.local); });
   }
 }
 
@@ -1027,7 +1108,16 @@ async function submitSupplement(d) {
 async function main() {
   requestPersistence();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').then((r) => r.update()).catch(() => {});
-  onSyncChange(() => { if (state.view === 'home') renderHome(); });
+  // 다 보내고 나면 배정·빈칸 수를 새로 받아 '마저 해야 할 화장실'을 맞춘다
+  let refreshTimer = null;
+  onSyncChange(() => {
+    if (state.view === 'home') renderHome();
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(async () => {
+      const pending = (await drafts.all()).some((d) => ['queued', 'sending', 'photos'].includes(d.status));
+      if (!pending && navigator.onLine) loadAssignments();
+    }, 3000);
+  });
   window.addEventListener('online', () => { if (state.view === 'home') { loadConfig().then(renderHome); } });
   window.addEventListener('offline', () => { if (state.view === 'home') renderHome(); });
   await loadConfig();

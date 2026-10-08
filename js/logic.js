@@ -856,9 +856,10 @@ export function assignmentStatus(a, localDrafts) {
   const mine = localDrafts.filter((d) => d.assignId === a.id && d.mode !== 'supplement');
   const editing = mine.find((d) => d.status === 'editing');
   if (editing) return { kind: 'editing', draft: editing };
-  const done = (a.done || [])[0];
+  // 여러 번(다시 조사) 제출됐으면 가장 최근 차수. missing = 서버가 센 빈 필수 칸 수(모르면 null)
+  const done = [...(a.done || [])].sort((x, y) => (y.round || 0) - (x.round || 0))[0];
   const sentLocal = mine.find((d) => d.serverId);
-  if (done || sentLocal) return { kind: 'done', tid: done?.tid || sentLocal.serverId, round: done?.round || sentLocal.round };
+  if (done || sentLocal) return { kind: 'done', tid: done?.tid || sentLocal.serverId, round: done?.round || sentLocal.round, missing: done?.missing ?? null };
   if (mine.some((d) => ['queued', 'sending', 'photos', 'failed'].includes(d.status))) return { kind: 'queued' };
   return { kind: 'todo' };
 }
