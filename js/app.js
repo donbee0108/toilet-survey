@@ -478,14 +478,29 @@ function modeTag(d) {
   return '';
 }
 
+/**
+ * 지금 고른 조의 화장실인가: 시트의 조사자가 그 조("3조")이거나, 그 조 활동 목록에서 조사한 곳이거나,
+ * 이 휴대폰에서 그 조로 보낸 곳. (예전 서버는 조사자를 안 보내므로 뒤의 두 가지로 판단)
+ */
+function myTeamToilet(t) {
+  const team = currentTeam();
+  if (!team) return true;
+  if (t.surveyor && t.surveyor === teamLabel(team)) return true;
+  const a = t.assignId && (state.assignments || []).find((x) => x.id === t.assignId);
+  if (a) return a.team === team;
+  if ((state.assignments || []).some((x) => x.team === team && (x.done || []).some((dn) => dn.tid === t.id))) return true;
+  return (state.myToiletIds || new Set()).has(t.id);
+}
+
 /** mode: 'resurvey'(새 차수로 다시 조사) | 'supplement'(제출한 조사의 빈칸 채우기) */
 async function renderResurvey(mode = 'resurvey') {
   state.view = 'resurvey';
   const supp = mode === 'supplement';
   const all = await drafts.all();
+  state.myToiletIds = new Set(all.filter((d) => d.serverId && d.surveyor === teamLabel(currentTeam())).map((d) => d.serverId));
   const unsent = all.filter((d) => ['queued', 'sending', 'photos', 'failed'].includes(d.status) && !d.serverId);
   $app.innerHTML = `<header class="bar"><div class="bar-row bar-row-title"><button class="btn" id="back">← 처음으로</button><h1 class="bar-title">${supp ? '지난 조사 보기·고치기' : '다시 조사할 화장실'}</h1></div></header>
-    <main class="home">${supp ? '<p class="hint">보낸 화장실 목록입니다. 화장실을 누르면 <b>빈칸을 채우거나 답을 고칠</b> 수 있습니다.</p>' : ''}
+    <main class="home">${supp ? `<p class="hint"><b>${esc(teamLabel(currentTeam()))}</b>가 보낸 화장실 목록입니다. 화장실을 누르면 <b>빈칸을 채우거나 답을 고칠</b> 수 있습니다.</p>` : ''}
     ${supp && unsent.length ? `<h2 class="sec">아직 못 보낸 조사</h2>${unsent.map((d) => `<div class="card row"><b class="grow">${esc(d.toilet.B0a || '(이름 없음)')}</b><span class="status s-${d.status}">${STATUS_TEXT[d.status]}</span></div>`).join('')}
       <p class="hint">인터넷이 되는 곳에서 자동으로 보냅니다. 보낸 뒤에 고칠 수 있습니다.</p><h2 class="sec">보낸 화장실</h2>` : ''}
     <input id="q" class="text-input" placeholder="이름·주소로 찾기" value="${esc(state.search)}">
@@ -494,7 +509,7 @@ async function renderResurvey(mode = 'resurvey') {
   const listEl = document.getElementById('list');
   const draw = () => {
     const q = state.search.trim();
-    const rows = (state.toilets || []).filter((t) => !q || [t.id, t.name, t.address].some((s) => String(s).includes(q)));
+    const rows = (state.toilets || []).filter((t) => (!supp || myTeamToilet(t)) && (!q || [t.id, t.name, t.address].some((s) => String(s).includes(q))));
     const suppOpen = new Set(all.filter((d) => d.mode === 'supplement' && d.status === 'editing').map((d) => d.serverId));
     listEl.innerHTML = rows.length ? rows.map((t) => {
       const chip = suppOpen.has(t.id) ? '<span class="status s-a-editing">보완 중</span>'
@@ -503,7 +518,7 @@ async function renderResurvey(mode = 'resurvey') {
       return `<button class="card pick" data-id="${esc(t.id)}">
       <div class="row"><b class="grow">${esc(t.name)}</b>${chip}</div><div class="sub">${esc(t.address)} ${esc(t.floor)} · ${esc(String(t.time).slice(0, 10))} 조사</div></button>`;
     }).join('')
-      : '<p class="hint">찾는 화장실이 없습니다.</p>';
+      : `<p class="hint">${q ? '찾는 화장실이 없습니다.' : `${esc(teamLabel(currentTeam()))}가 보낸 화장실이 아직 없습니다.`}</p>`;
     listEl.querySelectorAll('[data-id]').forEach((b) => { b.onclick = () => (supp ? startSupplementFromServer(b.dataset.id) : startResurvey(b.dataset.id)); });
   };
   document.getElementById('q').addEventListener('input', (e) => { state.search = e.target.value; draw(); });
