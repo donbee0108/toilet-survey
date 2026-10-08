@@ -178,13 +178,32 @@ function teamHtml(allDrafts) {
   return `${chips}${cal}
     ${mine ? `<div class="team-group">
       <h3 class="team-title">${esc(dateLabel(date))} ${esc(teamLabel(team))} 목록 <span class="sub">${mine.list.length}곳</span></h3>
-      ${mine.list.map((a) => {
-        const st = L.assignmentStatus(a, allDrafts);
-        return `<button class="card pick assign" data-assign="${esc(a.id)}">
-          <div class="row"><b class="grow">${esc(a.name)}</b><span class="status s-a-${st.kind}">${ASSIGN_TEXT[st.kind]}${st.tid ? ` ${esc(st.tid)}` : ''}</span></div>
-          <div class="sub">${esc((a.road && a.road !== '-') ? a.road : (a.lot || ''))}${a.memo ? ` · ${esc(a.memo)}` : ''}</div></button>`;
-      }).join('')}</div>`
+      ${mine.list.map((a) => assignCardHtml(a, allDrafts)).join('')}</div>`
       : `<p class="hint">${esc(dateLabel(date))}에는 ${esc(teamLabel(team))}에 배정된 화장실이 없습니다. 달력에서 노란 날을 눌러 보세요.</p>`}`;
+}
+
+/** 배정 카드 한 장: 이름·주소 + 상태 + 지금 할 일 (이어서 하기·전송 상태·보완 중을 카드에 모음) */
+function assignCardHtml(a, allDrafts) {
+  const st = L.assignmentStatus(a, allDrafts);
+  const mine = allDrafts.filter((d) => d.assignId === a.id && d.mode !== 'supplement').sort((x, y) => y.updatedAt - x.updatedAt);
+  const sending = mine.find((d) => ['queued', 'sending', 'photos', 'failed'].includes(d.status));
+  const supp = st.tid ? allDrafts.find((d) => d.mode === 'supplement' && d.status === 'editing' && d.serverId === st.tid) : null;
+  for (const d of [...mine, ...(supp ? [supp] : [])]) state.shownDrafts.add(d.localId);
+  let chip = `<span class="status s-a-${st.kind}">${ASSIGN_TEXT[st.kind]}${st.tid ? ` ${esc(st.tid)}` : ''}</span>`;
+  let todo = '';
+  if (st.kind === 'editing') {
+    const left = state.cfg ? L.missingAll(state.cfg, st.draft).length : 0;
+    todo = `<div class="todo">▶ 눌러서 이어서 하기${left ? ` · 필수 ${left}개 남음` : ' · 필수 모두 입력함'}</div>`;
+  } else if (sending) {
+    chip = `<span class="status s-${sending.status}">${STATUS_TEXT[sending.status]}</span>`;
+    todo = sending.status === 'failed' ? `<div class="err">${esc(sending.error || '전송 실패')} — 위 "지금 다시 보내기"를 눌러 주세요.</div>`
+      : `<div class="sub">${navigator.onLine ? '보내는 중입니다.' : '인터넷이 연결되면 자동으로 보냅니다.'}</div>`;
+  } else if (supp) {
+    todo = '<div class="todo">▶ 보완 중 · 눌러서 이어서 하기</div>';
+  }
+  return `<button class="card pick assign" data-assign="${esc(a.id)}">
+    <div class="row"><b class="grow">${esc(a.name)}</b>${chip}</div>
+    <div class="sub">${esc((a.road && a.road !== '-') ? a.road : (a.lot || ''))}${a.memo ? ` · ${esc(a.memo)}` : ''}</div>${todo}</button>`;
 }
 
 async function openAssignment(id) {
@@ -194,6 +213,8 @@ async function openAssignment(id) {
   if (st.kind === 'editing') return openDraft(st.draft.localId);
   if (st.kind === 'queued') { toast('이 휴대폰에서 이미 제출해 전송을 기다리는 화장실입니다.'); return; }
   if (st.kind === 'done') {
+    const supp = (await drafts.all()).find((d) => d.mode === 'supplement' && d.status === 'editing' && d.serverId === st.tid);
+    if (supp) return openDraft(supp.localId);
     const choice = await modal('이미 제출된 화장실입니다', `<p><b>${esc(a.name)}</b>은(는) ${esc(st.tid)} ${st.round || ''}차로 제출되어 있습니다.</p><p>빈칸만 채우려면 "빈칸 보완", 처음부터 다시 조사하려면 "다시 조사"를 눌러 주세요.</p>`,
       [{ label: '취소', value: '' }, { label: '다시 조사', value: 're' }, { label: '빈칸 보완', value: 'supp', primary: true }]);
     if (choice === 'supp') return startSupplementFromServer(st.tid);
@@ -226,8 +247,13 @@ async function renderHome() {
     const ps = allPhotos.filter((p) => p.localId === id);
     return { total: ps.length, done: ps.filter((p) => p.status === 'done').length };
   };
-  const editing = all.filter((d) => d.status === 'editing');
   const sent = all.filter((d) => d.status !== 'editing');
+  const failedN = all.filter((d) => d.status === 'failed').length;
+  const sendingN = all.filter((d) => ['queued', 'sending', 'photos'].includes(d.status)).length;
+  state.shownDrafts = new Set(); // 조 목록 카드에 나온 조사 (아래에 다시 보이지 않게)
+  const teamPart = state.cfg ? teamHtml(all) : '';
+  // 목록 카드에 안 나온 입력 중 조사 (목록에 없는 화장실, 다른 날짜·조, 보완)
+  const editing = all.filter((d) => d.status === 'editing' && !state.shownDrafts.has(d.localId));
   const needsPw = !!state.needPw;
   const noUrl = !apiUrl() || apiUrl().includes('여기에');
   const info = state.cfgInfo;
@@ -251,20 +277,22 @@ async function renderHome() {
       ${state.pwWrong ? '<div class="warn">비밀번호가 맞지 않습니다. 다시 확인해 주세요.</div>' : ''}
     </section>` : ''}
 
-    ${state.cfg ? teamHtml(all) : ''}
-    ${(state.assignments || []).length ? '<h2 class="sec">목록에 없는 화장실</h2>' : ''}
-    <button class="btn primary big" id="new" ${state.cfg ? '' : 'disabled'}>새 조사 시작</button>
-    <button class="btn big" id="supplement" ${state.cfg ? '' : 'disabled'}>제출한 조사 보완 (빈칸 채우기)</button>
-    ${!state.cfg && !needsPw ? '<p class="hint">조사 항목을 불러와야 시작할 수 있습니다. 인터넷에 연결한 뒤 아래 "설정·정보 → 조사 항목 새로 불러오기"를 눌러 주세요.</p>' : ''}
+    ${failedN ? `<div class="card warnbox row send-alert"><div class="grow"><b>보내지 못한 조사 ${failedN}건</b><div class="sub">인터넷이 되는 곳에서 다시 보내 주세요.</div></div><button class="btn primary" id="retry">지금 다시 보내기</button></div>`
+      : sendingN ? `<div class="card row send-alert"><div class="grow"><b>보내는 중 ${sendingN}건</b><div class="sub">${navigator.onLine ? '앱을 닫지 말고 잠시 기다려 주세요.' : '인터넷이 연결되면 자동으로 보냅니다.'}</div></div></div>` : ''}
 
-    ${editing.length ? `<h2 class="sec">이어서 하기</h2>
-      ${editing.map((d) => `<div class="card row">
+    ${teamPart}
+
+    ${(state.assignments || []).length ? '<h2 class="sec">목록에 없는 화장실</h2>' : (editing.length ? '<h2 class="sec">이어서 하기</h2>' : '')}
+    ${editing.length ? `${editing.map((d) => `<div class="card row">
         <div class="grow"><b>${esc(d.toilet.B0a || '(이름 없음)')}</b>${modeTag(d)}
           <div class="sub">${esc(d.surveyor)} · ${dateText(d.updatedAt)} 저장</div></div>
         <button class="btn primary" data-open="${d.localId}">이어서</button>
         <button class="btn danger small" data-del="${d.localId}" aria-label="삭제">삭제</button></div>`).join('')}` : ''}
+    <button class="btn primary big" id="new" ${state.cfg ? '' : 'disabled'}>새 조사 시작</button>
+    <button class="btn big" id="supplement" ${state.cfg ? '' : 'disabled'}>제출한 조사 보완</button>
+    ${!state.cfg && !needsPw ? '<p class="hint">조사 항목을 불러와야 시작할 수 있습니다. 인터넷에 연결한 뒤 아래 "설정·정보 → 조사 항목 새로 불러오기"를 눌러 주세요.</p>' : ''}
 
-    ${sent.length ? `<h2 class="sec">전송 상태</h2>
+    ${sent.length ? `<details class="card history" ${failedN ? 'open' : ''}><summary>이 휴대폰의 전송 기록 (${sent.length})</summary>
       ${sent.map((d) => {
         const ps = photoStat(d.localId);
         const supp = d.mode === 'supplement';
@@ -279,8 +307,7 @@ async function renderHome() {
           <span class="status s-${d.status}">${STATUS_TEXT[d.status] || d.status}</span></div>`;
       }).join('')}
       <div class="row gap">
-        <button class="btn" id="retry">지금 다시 보내기</button>
-        <button class="btn" id="clean">완료된 기록 정리</button></div>` : ''}
+        <button class="btn" id="clean">완료된 기록 정리</button></div></details>` : ''}
 
     <details class="card"><summary>설정·정보</summary>
       <p>조사 항목: ${info ? `${esc(info.version)} · ${info.count}개 · ${dateText(info.fetchedAt)} 불러옴${info.fromCache ? ' (기기에 저장된 사본)' : ''}` : '없음'}</p>
