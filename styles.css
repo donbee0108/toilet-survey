@@ -92,6 +92,8 @@ textarea.text-input { resize: vertical; }
 header.bar { position: sticky; top: 0; z-index: 5; background: rgba(255, 255, 255, .97); border-bottom: 1px solid #e7e3dd; box-shadow: 0 2px 10px rgba(40, 32, 20, .07); padding: 10px 12px; }
 .bar-row { display: flex; align-items: center; gap: 10px; max-width: 720px; margin: 0 auto; }
 .bar-title { font-size: 21px; margin: 0; }
+.bar-row-title { gap: 16px; }
+.bar-row-title .btn { flex: none; }
 .btn.nav { min-width: 92px; padding: 8px 12px; }
 .nav-spacer { min-width: 92px; }
 .progress { flex: 1; text-align: center; }

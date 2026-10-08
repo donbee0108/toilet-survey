@@ -484,7 +484,7 @@ async function renderResurvey(mode = 'resurvey') {
   const supp = mode === 'supplement';
   const all = await drafts.all();
   const unsent = all.filter((d) => ['queued', 'sending', 'photos', 'failed'].includes(d.status) && !d.serverId);
-  $app.innerHTML = `<header class="bar"><button class="btn" id="back">← 처음으로</button><h1 class="bar-title">${supp ? '지난 조사 보기·고치기' : '다시 조사할 화장실'}</h1></header>
+  $app.innerHTML = `<header class="bar"><div class="bar-row bar-row-title"><button class="btn" id="back">← 처음으로</button><h1 class="bar-title">${supp ? '지난 조사 보기·고치기' : '다시 조사할 화장실'}</h1></div></header>
     <main class="home">${supp ? '<p class="hint">보낸 화장실 목록입니다. 화장실을 누르면 <b>빈칸을 채우거나 답을 고칠</b> 수 있습니다.</p>' : ''}
     ${supp && unsent.length ? `<h2 class="sec">아직 못 보낸 조사</h2>${unsent.map((d) => `<div class="card row"><b class="grow">${esc(d.toilet.B0a || '(이름 없음)')}</b><span class="status s-${d.status}">${STATUS_TEXT[d.status]}</span></div>`).join('')}
       <p class="hint">인터넷이 되는 곳에서 자동으로 보냅니다. 보낸 뒤에 고칠 수 있습니다.</p><h2 class="sec">보낸 화장실</h2>` : ''}
