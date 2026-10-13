@@ -284,6 +284,14 @@ function todoListHtml() {
   const cards = [];
   const seen = new Set(state.shownKeys);
   const team = currentTeam();
+  // 조를 고른 뒤에만, 그 조의 화장실만 (조를 고르는 중이거나 아직 안 골랐으면 안 보임)
+  if (!team || state.pickTeam) return '';
+  const mineTeam = (g) => {
+    const a = g.assignId && (state.assignments || []).find((x) => x.id === g.assignId);
+    if (a) return a.team === team;
+    return g.drafts.some((d) => d.surveyor === teamLabel(team));
+  };
+  for (const g of state.groups.values()) if (!mineTeam(g)) seen.add(g.key);
   const fillCard = (name, sub, tid, miss) => `<button class="card pick assign" data-fill="${esc(tid)}">
     <div class="row"><b class="grow">${esc(name)}</b><span class="status s-blank">빈칸 ${miss}개</span></div>
     ${sub ? `<div class="sub">${sub}</div>` : ''}<div class="todo">▶ 눌러서 빈칸 채우기</div></button>`;
