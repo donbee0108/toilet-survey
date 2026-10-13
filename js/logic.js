@@ -852,13 +852,18 @@ export function groupSummary(g) {
 }
 
 /** 배정 항목 상태: 이 휴대폰의 조사 기록 + 서버의 제출 기록 */
-export function assignmentStatus(a, localDrafts) {
+/**
+ * serverAt: 서버 활동 목록을 받기 시작한 시각(ms). 그 뒤에 받은 목록에 없는 '이 휴대폰에서 보낸 기록'은
+ * 시트에서 지운 것으로 보고 제출됨으로 치지 않는다 (시험 기록을 시트에서 지웠을 때 휴대폰에 남는 문제).
+ */
+export function assignmentStatus(a, localDrafts, { serverAt = 0 } = {}) {
   const mine = localDrafts.filter((d) => d.assignId === a.id && d.mode !== 'supplement');
   const editing = mine.find((d) => d.status === 'editing');
   if (editing) return { kind: 'editing', draft: editing };
   // 여러 번(다시 조사) 제출됐으면 가장 최근 차수. missing = 서버가 센 빈 필수 칸 수(모르면 null)
   const done = [...(a.done || [])].sort((x, y) => (y.round || 0) - (x.round || 0))[0];
-  const sentLocal = mine.find((d) => d.serverId);
+  const savedAt = (d) => d.savedAt || d.sentAt || d.queuedAt || 0;
+  const sentLocal = mine.find((d) => d.serverId && !(serverAt && serverAt > savedAt(d)));
   if (done || sentLocal) return { kind: 'done', tid: done?.tid || sentLocal.serverId, round: done?.round || sentLocal.round, missing: done?.missing ?? null };
   if (mine.some((d) => ['queued', 'sending', 'photos', 'failed'].includes(d.status))) return { kind: 'queued' };
   return { kind: 'todo' };

@@ -84,12 +84,14 @@ async function loadConfig({ force = false } = {}) {
 // ---------- 배정 목록 ----------
 async function loadAssignments() {
   const cached = await kv.get('assignments');
-  if (Array.isArray(cached?.items)) { state.assignments = cached.items; state.assignmentsReady = true; }
+  if (Array.isArray(cached?.items)) { state.assignments = cached.items; state.assignmentsReady = true; state.assignmentsAt = cached.startedAt || 0; }
   if (!navigator.onLine || !apiUrl()) { state.assignmentsReady = true; return; }
   try {
+    const startedAt = Date.now();
     const res = await call('assignments');
     state.assignments = res.items || [];
-    await kv.set('assignments', { items: state.assignments, fetchedAt: Date.now() });
+    state.assignmentsAt = startedAt;
+    await kv.set('assignments', { items: state.assignments, fetchedAt: Date.now(), startedAt });
   } catch { /* 예전 서버(배정 기능 없음)거나 끊김 — 저장된 목록을 씀 */ }
   await loadToiletInfo();
   state.assignmentsReady = true;
@@ -172,7 +174,7 @@ function teamHtml(allDrafts) {
   for (const a of teamItems) {
     const s = byDate.get(a.date) || { n: 0, done: 0, blank: 0 };
     s.n++;
-    const st = L.assignmentStatus(a, allDrafts);
+    const st = L.assignmentStatus(a, allDrafts, { serverAt: state.assignmentsAt });
     if (st.kind === 'done') {
       s.done++;
       if ((st.missing ?? toiletMissing(st.tid)) > 0) s.blank++; // 다녀왔지만 빈칸이 남은 곳
@@ -209,7 +211,7 @@ function teamHtml(allDrafts) {
 /** 배정 카드 한 장: 이름·주소 + 상태 + 지금 할 일. 이 화장실의 휴대폰 기록(입력·보완·전송)은 모두 이 카드에만 */
 function assignCardHtml(a, allDrafts) {
   state.shownKeys.add(`A:${a.id}`);
-  const st = L.assignmentStatus(a, allDrafts);
+  const st = L.assignmentStatus(a, allDrafts, { serverAt: state.assignmentsAt });
   const g = state.groups?.get(`A:${a.id}`);
   const sum = g ? L.groupSummary(g) : null;
   let chip = `<span class="status s-a-${st.kind}">${ASSIGN_TEXT[st.kind]}${st.tid ? ` ${esc(st.tid)}` : ''}</span>`;
@@ -300,7 +302,7 @@ function todoListHtml() {
   for (const a of state.assignments || []) {
     const key = `A:${a.id}`;
     if (seen.has(key) || a.team !== team) continue;
-    const st = L.assignmentStatus(a, state.groups.get(key)?.drafts || []);
+    const st = L.assignmentStatus(a, state.groups.get(key)?.drafts || [], { serverAt: state.assignmentsAt });
     const miss = st.kind === 'done' ? (st.missing ?? toiletMissing(st.tid)) : null;
     if (!(miss > 0)) continue;
     seen.add(key);
@@ -321,7 +323,7 @@ function todoListHtml() {
 async function openAssignment(id) {
   const a = (state.assignments || []).find((x) => x.id === id);
   if (!a) return;
-  const st = L.assignmentStatus(a, await drafts.all());
+  const st = L.assignmentStatus(a, await drafts.all(), { serverAt: state.assignmentsAt });
   if (st.kind === 'editing') return openDraft(st.draft.localId);
   if (st.kind === 'queued') { toast('이 휴대폰에서 이미 제출해 전송을 기다리는 화장실입니다.'); return; }
   if (st.kind === 'done') {

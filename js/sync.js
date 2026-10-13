@@ -37,6 +37,7 @@ async function sendDraft(d) {
     await drafts.put(d); emit();
     const res = await call('submit', d.submission);
     d.serverId = res.id;
+    d.savedAt = Date.now(); // 서버에 줄이 생긴 시각 (활동 목록과 비교용)
     d.round = res.round;
     d.spaceIds = Object.fromEntries(d.spaceKeys.map((k, i) => [k, res.spaceIds[i]]));
     d.warnings = res.warnings || [];
