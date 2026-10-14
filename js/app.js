@@ -834,10 +834,10 @@ async function copyFromFirst(page) {
   const d = state.draft;
   const src = L.copySourceFor(d, page.ctx);
   if (!src) return;
-  const { changed, overwritten } = L.copySpaceValues(d, src.key, page.ctx, page.codes, { dryRun: true });
+  const { changed, overwritten } = L.copySpaceValues(d, src.key, page.ctx, page.codes, { dryRun: true, cfg: state.cfg });
   if (!changed.length) { toast('이미 첫 칸과 같습니다.'); return; }
   if (overwritten && !(await confirmBox('이미 적은 답이 있습니다', `<p>이 화면에서 이미 적은 답 ${overwritten}개도 첫 칸 값으로 바꿀까요?</p>`, '바꾸기', '취소'))) return;
-  const res = L.copySpaceValues(d, src.key, page.ctx, page.codes);
+  const res = L.copySpaceValues(d, src.key, page.ctx, page.codes, { cfg: state.cfg });
   for (const code of res.changed) markTouched(page.ctx, code);
   saveSoon();
   toast(`${res.changed.length}개 문항을 첫 칸과 같게 넣었습니다.`);
@@ -920,7 +920,11 @@ function itemHtml(it, ctx, draftPhotos, sug) {
   const edited = L.isEdited(state.cfg, d, ctx, it.code);
   const origText = d.orig?.[key] === 'NA' ? '해당 없음' : (it.list ? String(d.orig?.[key] ?? '').split(',').map((v) => choiceLabel(it, v)).join(', ') : d.orig?.[key]);
   let input = '';
-  if (it.type === L.MULTI) {
+  const isPhotoItem = it.type === L.PHOTO;
+  if (isPhotoItem) {
+    // 답 형식 '사진': 아래 📷 버튼으로 찍으면 장수가 답이 된다
+    input = `<div class="photo-ask ${myPhotos.length ? 'done' : ''}">${myPhotos.length ? `찍은 사진 <b>${myPhotos.length}장</b>` : '아래 <b>📷 사진 찍기</b>를 눌러 주세요'}</div>`;
+  } else if (it.type === L.MULTI) {
     const opts = state.cfg.choices[it.list] || [];
     const sel = L.splitMulti(raw);
     input = `<div class="hint">여러 개 고를 수 있습니다.</div><div class="choices multi ${locked ? 'locked' : ''}">${opts.map((o) => `<button class="choice ${sel.includes(o.value) ? 'on' : ''}" data-multi="${esc(o.value)}" aria-pressed="${sel.includes(o.value)}" ${locked ? 'disabled' : ''}>${esc(o.label)}</button>`).join('')}</div>`;
@@ -949,7 +953,7 @@ function itemHtml(it, ctx, draftPhotos, sug) {
     ${input}
     <div class="feedback">${feedbackHtml(it, raw)}${L.multiWarning(state.cfg, it, raw) ? `<div class="warn">${esc(L.multiWarning(state.cfg, it, raw))}</div>` : ''}</div>
     ${sug ? `<div class="suggest ${suggested ? 'on' : ''}">${suggested ? '<b>자동 제안</b> — 맞는지 확인하고, 다르면 고쳐 주세요. ' : ''}${!suggested && sug.value != null && blank(raw) ? `<b>제안: ${esc(choiceLabel(it, sug.value))}</b> — 맞으면 직접 눌러 주세요. ` : ''}${esc(sug.reason)}</div>` : ''}
-    <div class="photo-row"><label class="btn small camera">📷 사진<input type="file" accept="image/*" capture="environment" data-photo hidden></label>${photoStrip(myPhotos)}</div>
+    <div class="photo-row"><label class="btn ${isPhotoItem ? 'primary' : 'small'} camera">📷 ${isPhotoItem ? '사진 찍기' : '사진'}<input type="file" accept="image/*" capture="environment" data-photo hidden></label>${photoStrip(myPhotos)}</div>
   </div>`;
 }
 
@@ -1076,6 +1080,7 @@ function bindPage(page) {
           description: `${info?.label ? `${info.label} · ` : ''}${it.question}`,
         }, blob);
         toast('사진을 저장했습니다.');
+        await syncPhotoCount(ctx, code);
         keepScroll(renderPage);
       } catch (err) { toast(err.message); }
     });
@@ -1089,10 +1094,23 @@ function bindPage(page) {
   $app.querySelectorAll('[data-delphoto]').forEach((b) => {
     b.onclick = async () => {
       if (!await confirmBox('사진 지우기', '<p>이 사진을 지울까요?</p>', '지우기', '취소')) return;
+      const meta = (await photos.byDraft(state.draft.localId)).find((p) => p.photoId === b.dataset.delphoto);
       await photos.remove(b.dataset.delphoto);
+      if (meta) await syncPhotoCount(meta.spaceKey || L.TOILET, meta.itemCode);
       keepScroll(renderPage);
     };
   });
+}
+
+/** 답 형식 '사진' 문항: 그 문항에 찍은 사진 장수를 답으로 넣는다 (0장이면 빈칸 = 아직 안 찍음) */
+async function syncPhotoCount(ctx, code) {
+  const d = state.draft;
+  const it = state.cfg.byCode[code];
+  if (!d || !it || it.type !== L.PHOTO || L.isLocked(d, ctx, code)) return;
+  const n = (await photos.byDraft(d.localId)).filter((p) => p.itemCode === code && (p.spaceKey || L.TOILET) === ctx && p.status !== 'lost').length;
+  L.setRaw(d, ctx, code, n ? String(n) : '');
+  markTouched(ctx, code);
+  saveSoon();
 }
 
 async function keepScroll(fn) {

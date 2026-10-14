@@ -241,6 +241,10 @@ button.progress { border: 0; border-radius: var(--radius); background: none; fon
 .home-actions .btn { margin: 0; }
 .guide-link { display: block; text-align: center; padding: 12px; min-height: 48px; color: var(--primary); font-weight: 700; margin: 0 !important; }
 
+.photo-ask { font-size: 19px; padding: 10px 14px; border-radius: var(--radius); background: var(--warn-bg); border: 1.5px dashed #e8c27a; }
+.photo-ask.done { background: var(--ok-bg); border: 1.5px solid #9fd3b0; color: var(--ok); }
+.photo-row .btn.primary.camera { min-height: 56px; padding: 10px 22px; }
+
 /* 확인 창, 알림 */
 .modal-wrap { position: fixed; inset: 0; background: rgba(28, 24, 18, .5); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 20; }
 .modal { background: #fff; border-radius: 22px; padding: 22px; max-width: 560px; width: 100%; max-height: 85vh; overflow: auto; box-shadow: 0 12px 40px rgba(0, 0, 0, .2); }

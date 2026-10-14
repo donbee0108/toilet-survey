@@ -1,5 +1,5 @@
 // 조사 로직 (화면·저장과 무관한 순수 함수). 브라우저와 Node 테스트에서 함께 쓴다.
-import { parseSkip, shouldSkip } from './skip.js';
+import { parseSkip, shouldSkip, ruleList } from './skip.js';
 
 // 요청서에 이름이 나온 항목코드만 여기 둔다. 기준 숫자는 모두 항목정의에서 읽는다.
 export const MULTI_COUNT_CODES = { C1a: 'MALE', C1b: 'FEMALE', C1c: 'SHARED' };
@@ -10,6 +10,7 @@ const PAGE_MAX = 8;   // 한 화면 최대 문항 수
 const PAGE_SPLIT = 7; // 나눌 때 목표 문항 수
 
 export const TOILET = 't';
+export const PHOTO = '사진'; // 답 형식 '사진': 그 문항에 찍은 사진 장수가 답(사진이 있어야 답한 것)
 export const MA = 'MA';
 export const FE = 'FE';
 
@@ -108,16 +109,33 @@ function forcedNA(cfg, draft, ctx, code) {
   return false;
 }
 
-/** 건너뛰기 조건이 참인가. 앞 항목도 건너뛰어졌으면 그 값은 NA로 본다(연쇄). */
+/** 건너뛰기 조건이 참인가. 앞 항목도 건너뛰어졌으면 그 값은 NA로 본다(연쇄). '; '로 이은 조건은 하나라도 맞으면 건너뜀 */
 export function isSkipped(cfg, draft, ctx, code, depth = 0) {
   const item = cfg.byCode[code];
   if (!item?.rule || item.rule.error || depth > 10) return false;
-  const refItem = cfg.byCode[item.rule.ref];
+  return ruleList(item.rule).some((r) => ruleSkips(cfg, draft, ctx, r, depth));
+}
+
+function ruleSkips(cfg, draft, ctx, rule, depth) {
+  const refItem = cfg.byCode[rule.ref];
   if (!refItem) return false;
+  // '이 쪽 장애인 화장실 …': 남자·여자화장실 화면에서만. 같은 쪽(공용 포함) 장애인 칸 중 그 답인 칸이 없으면 건너뜀
+  if (rule.op === 'sideNeq') {
+    if (ctx !== MA && ctx !== FE) return false;
+    const side = ctx === MA ? 'MALE' : 'FEMALE';
+    const values = multiSpaces(draft).filter((sp) => sp.side === side || sp.side === 'SHARED')
+      .map((sp) => finalValue(cfg, draft, sp.key, refItem.code, depth + 1));
+    return !values.some((v) => !shouldSkip({ op: 'neq', value: rule.value }, v));
+  }
   // 공간 항목의 조건은 같은 공간의 답을 먼저 보고, 화장실 항목이면 화장실 답을 본다.
   const refCtx = refItem.tab === '화장실' ? TOILET : ctx;
+  // 앞 항목이 이 공간에 묻지 않는 항목이면(예: 장애인 칸에서 남녀용 '비상벨 칸 수') 그 조건은 따지지 않는다
+  if (refCtx !== TOILET) {
+    const info = spaceInfo(draft, ctx);
+    if (info && info.kind !== TOILET && !appliesTo(refItem, info.kind)) return false;
+  }
   const refValue = finalValue(cfg, draft, refCtx, refItem.code, depth + 1);
-  return shouldSkip(item.rule, refValue);
+  return shouldSkip(rule, refValue);
 }
 
 /** 시트에 저장될 값 */
@@ -131,7 +149,7 @@ export function finalValue(cfg, draft, ctx, code, depth = 0) {
 export function normalize(item, raw) {
   if (blank(raw)) return '';
   if (raw === 'NA') return 'NA';
-  if (item && (item.type === '숫자' || item.type === '정수')) {
+  if (item && (item.type === '숫자' || item.type === '정수' || item.type === PHOTO)) {
     const n = Number(String(raw).replace(/,/g, '').trim());
     return Number.isFinite(n) ? n : String(raw).trim();
   }
@@ -338,7 +356,7 @@ export function suggestH(cfg, draft) {
   const numericA3 = a3 && (a3.type === '정수' || a3.type === '숫자');
   const accessOk = numericA3 ? num(fv(TOILET, 'A3a')) === 0 : (fv(TOILET, 'A3a') === 'N' || fv(TOILET, 'A4') === 'Y');
   // 칸 안 조건: 있는 항목만. 치수는 '법 최소' 이상, 변기 앞 공간이 선택형이면 '있음'
-  const sizeCodes = ['C7', 'C10a', 'C10b', 'C11'].filter((c) => cfg.byCode[c] && ['숫자', '정수'].includes(cfg.byCode[c].type));
+  const sizeCodes = ['C7', 'C10a', 'C10b', 'C11', 'C12c', 'C12d'].filter((c) => cfg.byCode[c] && ['숫자', '정수'].includes(cfg.byCode[c].type));
   const frontChoice = cfg.byCode.C12b && cfg.byCode.C12b.type === '선택(하나)';
   const wheel = (sp) => {
     const need = ['C4', ...sizeCodes, ...(frontChoice ? ['C12b'] : [])];
@@ -389,7 +407,12 @@ export function suggestH(cfg, draft) {
     const f3s = f3Item && f3Item.tab !== '화장실'
       ? allSpaces(draft).filter((sp) => appliesTo(f3Item, sp.kind)).map((sp) => fv(sp.key, 'F3')).filter((v) => v !== 'NA')
       : [];
-    const noBells = f3s.length > 0 && f3s.every((v) => num(v) === 0);
+    // v5: 장애인 칸은 위(F1)·아래(F2) 비상벨이 둘 다 '없음'이어야 비상벨 없음
+    const multiBells = cfg.byCode.F1 && cfg.byCode.F1.list === '있음없음2' && cfg.byCode.F2
+      ? multis.map((sp) => [fv(sp.key, 'F1'), fv(sp.key, 'F2')]).filter(([a, b]) => a !== 'NA' || b !== 'NA')
+      : [];
+    const noBells = (f3s.length > 0 || multiBells.length > 0) && f3s.every((v) => num(v) === 0)
+      && multiBells.every(([a, b]) => a === 'N' && b === 'N');
     if (noBells) out.H4 = { value: 'N', reason: '비상벨이 있는 칸이 없습니다.' };
     else if (f6 === 'Y' || f7.includes('TEXT')) out.H4 = { value: 'Y', reason: f6 === 'Y' ? "'호출됨' 불빛이 있습니다." : '비상벨을 누른 뒤 문자·화상으로 소통할 수 있습니다.' };
     else if (f7Known && (!hasF6 || !blank(f6))) out.H4 = { value: 'N', reason: '비상벨을 누른 뒤 문자·화상으로 소통할 방법이 없습니다.' };
@@ -479,7 +502,7 @@ export function prefillFromPrevious(cfg, draft, prev) {
   // 이번에도 건너뛰어지면 제출할 때 다시 NA가 된다.
   const autoNA = (it, v) => String(v) === 'NA' && (it.rule || SIDE_ONLY_TOILET_ITEMS[it.code]);
   readRows(cfg, draft, prev, (ctx, it, v) => {
-    if (blank(v) || autoNA(it, v)) return;
+    if (blank(v) || autoNA(it, v) || it.type === PHOTO) return; // 사진 장수는 옮기지 않음(사진은 새로 찍음)
     if ((ctx === MA && draft.hasMale === false) || (ctx === FE && draft.hasFemale === false)) return;
     setRaw(draft, ctx, it.code, String(v));
     draft.prefilled[`${ctx}:${it.code}`] = true;
@@ -511,16 +534,14 @@ export function supplementFromRows(cfg, draft, prev) {
   for (const code of STRUCTURE_CODES) draft.locked[`${TOILET}:${code}`] = true;
   // 자동 NA 풀기: NA인데, 그 조건이 '앞 질문이 빈칸이면 건너뜀'으로 동작하는 규칙(아니면·미만)이고
   // 앞 질문이 빈칸(또는 그 역시 자동 NA)일 때. '…이면 건너뜀'(eq)은 빈칸이면 건너뛰지 않으므로 그 NA는 직접 고른 것.
+  // 여러 조건('; ')이면: 앞 답을 아는 조건 중 건너뛰게 하는 것이 없고, 앞 답을 몰라서 건너뛴 조건이 있을 때만
   for (let pass = 0; pass <= cfg.items.length; pass++) {
     let changed = false;
     for (const [key, v] of Object.entries(draft.orig)) {
       if (v !== 'NA' || draft.replaceable[key]) continue;
       const [ctx, code] = key.split(':');
-      const rule = cfg.byCode[code]?.rule;
-      if (!rule || rule.error || !shouldSkip(rule, '')) continue;
-      const refCtx = cfg.byCode[rule.ref]?.tab === '화장실' ? TOILET : ctx;
-      const refKey = `${refCtx}:${rule.ref}`;
-      if (draft.orig[refKey] === '' || draft.replaceable[refKey]) {
+      const states = ruleList(cfg.byCode[code]?.rule).map((r) => origRuleState(cfg, draft, ctx, r));
+      if (!states.includes('skip') && states.includes('blank')) {
         draft.replaceable[key] = true;
         delete draft.locked[key];
         setRaw(draft, ctx, code, '');
@@ -530,6 +551,31 @@ export function supplementFromRows(cfg, draft, prev) {
     if (!changed) break;
   }
   return draft;
+}
+
+/**
+ * 시트에 저장된 원래 값으로 건너뛰기 조건 하나를 판단한다.
+ * 'skip' = 앞 답이 있고 그 답 때문에 건너뜀 · 'blank' = 앞 답이 비어(또는 자동 NA) 건너뜀 · 'show' = 건너뛰지 않음
+ */
+function origRuleState(cfg, draft, ctx, rule) {
+  const refItem = cfg.byCode[rule.ref];
+  if (!refItem) return 'show';
+  const unknown = (k) => (draft.orig[k] ?? '') === '' || !!draft.replaceable[k];
+  if (rule.op === 'sideNeq') {
+    if (ctx !== MA && ctx !== FE) return 'show';
+    const side = ctx === MA ? 'MALE' : 'FEMALE';
+    const keys = multiSpaces(draft).filter((sp) => sp.side === side || sp.side === 'SHARED').map((sp) => `${sp.key}:${rule.ref}`);
+    if (keys.some((k) => !unknown(k) && !shouldSkip({ op: 'neq', value: rule.value }, draft.orig[k]))) return 'show';
+    return keys.some(unknown) || !keys.length ? (keys.length ? 'blank' : 'skip') : 'skip';
+  }
+  const refCtx = refItem.tab === '화장실' ? TOILET : ctx;
+  if (refCtx !== TOILET) {
+    const info = spaceInfo(draft, ctx);
+    if (info && info.kind !== TOILET && !appliesTo(refItem, info.kind)) return 'show';
+  }
+  const k = `${refCtx}:${rule.ref}`;
+  if (unknown(k)) return shouldSkip(rule, '') ? 'blank' : 'show';
+  return shouldSkip(rule, normalize(refItem, draft.orig[k])) ? 'skip' : 'show';
 }
 
 export const isLocked = (draft, ctx, code) => !!draft.locked?.[`${ctx}:${code}`] && !draft.unlocked?.[`${ctx}:${code}`];
@@ -565,10 +611,8 @@ export function reopenSkipped(cfg, draft) {
   for (const [key, o] of Object.entries(draft.orig || {})) {
     if (o !== 'NA' || !draft.locked?.[key] || draft.unlocked?.[key]) continue;
     const [ctx, code] = key.split(':');
-    const rule = cfg.byCode[code]?.rule;
-    if (!rule || rule.error) continue;
-    const refCtx = cfg.byCode[rule.ref]?.tab === '화장실' ? TOILET : ctx;
-    if (!shouldSkip(rule, normalize(cfg.byCode[rule.ref], draft.orig[`${refCtx}:${rule.ref}`] ?? ''))) continue;
+    const states = ruleList(cfg.byCode[code]?.rule).map((r) => origRuleState(cfg, draft, ctx, r));
+    if (!states.some((st) => st === 'skip' || st === 'blank')) continue; // 원래도 건너뛴 NA가 아니면 직접 고른 NA
     if (isSkipped(cfg, draft, ctx, code)) continue;
     draft.unlocked = draft.unlocked || {};
     draft.unlocked[key] = true;
@@ -591,11 +635,12 @@ export function copySourceFor(draft, ctx) {
  * 첫 칸이 비어 있는 문항과 잠긴(저장됨) 칸은 그대로 둔다. dryRun이면 세기만 한다.
  * 사진은 칸마다 따로라 복사하지 않는다.
  */
-export function copySpaceValues(draft, srcKey, ctx, codes, { dryRun = false } = {}) {
+export function copySpaceValues(draft, srcKey, ctx, codes, { dryRun = false, cfg = null } = {}) {
   const changed = [];
   let overwritten = 0;
   for (const code of codes) {
     if (isLocked(draft, ctx, code)) continue;
+    if (cfg?.byCode?.[code]?.type === PHOTO) continue; // 사진은 칸마다 따로
     const v = getRaw(draft, srcKey, code);
     if (blank(v)) continue;
     const cur = getRaw(draft, ctx, code);
@@ -667,9 +712,13 @@ export function mergeFresh(cfg, draft, prev) {
 export function buildSupplementPayload(cfg, draft, nowText) {
   reopenSkipped(cfg, draft);
   // 빈칸 채우기: 시트에서 비어 있던 칸(또는 자동 NA라 다시 연 칸)
+  // 서버가 읽지 못하는 조건('; ' 여러 조건, '이 쪽 장애인 화장실')의 자동 NA를 푼 칸은 빈칸 채우기 대신
+  // '고친 칸'(NA → 새 값, auto)으로 보낸다 — 서버는 그런 칸의 NA를 스스로 풀지 못하므로
+  const serverReads = (rule) => !!rule && !rule.error && rule.op !== 'any' && rule.op !== 'sideNeq';
+  const viaEdit = (key, it) => !!draft.replaceable[key] && !serverReads(it.rule);
   const changed = (ctx, it) => {
     const key = `${ctx}:${it.code}`;
-    if (draft.locked[key]) return undefined;
+    if (draft.locked[key] || viaEdit(key, it)) return undefined;
     const v = finalValue(cfg, draft, ctx, it.code);
     if (blank(v) || String(v) === (draft.orig[key] ?? '')) return undefined;
     return v;
@@ -678,7 +727,8 @@ export function buildSupplementPayload(cfg, draft, nowText) {
   // 서버는 시트 값이 from 그대로일 때만 바꾼다 (그사이 다른 기기가 고쳤으면 겹친 칸으로 알려 줌)
   const edited = (ctx, it) => {
     const key = `${ctx}:${it.code}`;
-    if (!draft.locked[key]) return undefined;
+    const special = viaEdit(key, it);
+    if (!draft.locked[key] && !special) return undefined;
     if (ctx === TOILET && STRUCTURE_CODES.includes(it.code)) return undefined;
     const from = draft.orig[key] ?? '';
     const v = finalValue(cfg, draft, ctx, it.code);
@@ -686,18 +736,28 @@ export function buildSupplementPayload(cfg, draft, nowText) {
     if (String(to) === String(normalize(it, from) ?? '') || String(to) === from) return undefined;
     // 직접 고친 칸이 아니면, 앞 질문이 이번에 바뀌어 건너뛰기가 달라진 경우에만 보낸다
     // (시트에 원래 어긋난 값이 있어도 보완할 때마다 몰래 NA로 바꾸지 않도록)
-    if (!draft.unlocked?.[key] && !parentChanged(ctx, it)) return undefined;
+    if (!special && !draft.unlocked?.[key] && !parentChanged(ctx, it)) return undefined;
     // auto = 앞 답 때문에 같이 바뀐 칸: 서버는 앞 답이 실제로 그렇게 바뀌었을 때만 쓴다
-    const auto = !draft.unlocked?.[key] || !!draft.reopened?.[key] || isSkipped(cfg, draft, ctx, it.code);
+    const auto = special || !draft.unlocked?.[key] || !!draft.reopened?.[key] || isSkipped(cfg, draft, ctx, it.code);
     return auto ? { from, to, auto } : { from, to };
   };
   const parentChanged = (ctx, it, depth = 0) => {
-    const rule = it.rule;
-    if (!rule || rule.error || depth > 10) return false;
-    const refCtx = cfg.byCode[rule.ref]?.tab === '화장실' ? TOILET : ctx;
-    const refKey = `${refCtx}:${rule.ref}`;
-    const now = finalValue(cfg, draft, refCtx, rule.ref);
-    return String(blank(now) ? '' : now) !== String(normalize(cfg.byCode[rule.ref], draft.orig[refKey] ?? '') ?? '') || parentChanged(refCtx, cfg.byCode[rule.ref], depth + 1);
+    if (!it?.rule || it.rule.error || depth > 10) return false;
+    return ruleList(it.rule).some((rule) => {
+      if (!cfg.byCode[rule.ref]) return false;
+      if (rule.op === 'sideNeq') {
+        if (ctx !== MA && ctx !== FE) return false;
+        const side = ctx === MA ? 'MALE' : 'FEMALE';
+        return multiSpaces(draft).filter((sp) => sp.side === side || sp.side === 'SHARED').some((sp) => {
+          const now = finalValue(cfg, draft, sp.key, rule.ref);
+          return String(blank(now) ? '' : now) !== String(draft.orig[`${sp.key}:${rule.ref}`] ?? '');
+        });
+      }
+      const refCtx = cfg.byCode[rule.ref].tab === '화장실' ? TOILET : ctx;
+      const refKey = `${refCtx}:${rule.ref}`;
+      const now = finalValue(cfg, draft, refCtx, rule.ref);
+      return String(blank(now) ? '' : now) !== String(normalize(cfg.byCode[rule.ref], draft.orig[refKey] ?? '') ?? '') || parentChanged(refCtx, cfg.byCode[rule.ref], depth + 1);
+    });
   };
   const replaceNA = (ctx) => cfg.items.filter((it) => draft.replaceable[`${ctx}:${it.code}`]).map((it) => it.var);
   const toilet = {};
