@@ -1,7 +1,7 @@
 // 오프라인용: 앱 파일을 휴대폰에 저장해 두고, 인터넷이 없어도 앱이 열리게 한다.
 // ★ 앱 파일(config.js 포함)을 고쳐 올릴 때는 반드시 VERSION을 하나 올린다 (v1 → v2).
 //   VERSION이 바뀌어야 휴대폰이 새 파일 전체를 한 번에 받아 바꾼다. 파일이 섞여 앱이 깨지는 일을 막기 위함.
-const VERSION = 'v31';
+const VERSION = 'v32';
 const CACHE = `toilet-survey-${VERSION}`;
 const FILES = [
   './', './index.html', './styles.css', './config.js', './manifest.webmanifest',
@@ -28,8 +28,12 @@ self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET' || url.origin !== self.location.origin) return;
   e.respondWith((async () => {
     const cache = await caches.open(CACHE);
-    const hit = await cache.match(e.request, { ignoreSearch: true })
-      || (e.request.mode === 'navigate' ? await cache.match('./index.html') : undefined);
-    return hit || fetch(e.request);
+    const hit = await cache.match(e.request, { ignoreSearch: true });
+    if (hit) return hit;
+    // 앱에 없는 페이지(사용법 guide.html 등)는 인터넷에서 받고, 인터넷이 없을 때만 앱 첫 화면을 보여 준다
+    try { return await fetch(e.request); } catch (err) {
+      if (e.request.mode === 'navigate') return (await cache.match('./index.html')) || Response.error();
+      throw err;
+    }
   })());
 });

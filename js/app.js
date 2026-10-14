@@ -410,6 +410,7 @@ async function renderHome() {
     <div class="home-actions">
       <button class="btn big" id="new" ${state.cfg ? '' : 'disabled'}>➕ 목록에 없는 화장실 조사</button>
       <button class="btn big" id="supplement" ${state.cfg ? '' : 'disabled'}>📋 지난 조사 보기·고치기</button>
+      <a class="btn link guide-link" href="./guide.html" target="_blank" rel="noopener">📖 앱 사용법 보기</a>
     </div>
     ${!state.cfg && !needsPw ? '<p class="hint">조사 항목을 불러와야 시작할 수 있습니다. 인터넷에 연결한 뒤 아래 "설정·정보 → 조사 항목 새로 불러오기"를 눌러 주세요.</p>' : ''}
 
