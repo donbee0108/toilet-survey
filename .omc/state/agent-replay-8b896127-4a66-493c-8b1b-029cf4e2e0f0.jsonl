@@ -1,4 +1,0 @@
-{"t":0,"agent":"adb1a00","agent_type":"general-purpose","event":"agent_start","parent_mode":"none"}
-{"t":0,"agent":"a48313b","agent_type":"general-purpose","event":"agent_start","parent_mode":"none"}
-{"t":0,"agent":"a48313b","agent_type":"general-purpose","event":"agent_stop","success":true,"duration_ms":266223}
-{"t":0,"agent":"adb1a00","agent_type":"general-purpose","event":"agent_stop","success":true,"duration_ms":336244}
