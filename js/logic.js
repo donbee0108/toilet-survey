@@ -877,12 +877,15 @@ export function buildSupplementPayload(cfg, draft, nowText) {
   const filledCount = Object.keys(toilet).length + spaces.reduce((n, s) => n + Object.keys(s.values).length, 0);
   const editCount = Object.keys(edits).length + spaces.reduce((n, s) => n + Object.keys(s.edits).length, 0);
   const count = filledCount + editCount;
+  // 화면에 보일 '고친 칸' = 조사원이 ✏️ 고치기로 바꾼 칸만 (앞 답 때문에 앱이 같이 바꾼 칸(auto)은 빼고)
+  const manual = (e) => Object.values(e).filter((x) => !x?.auto).length;
+  const userEditCount = manual(edits) + spaces.reduce((n, s) => n + manual(s.edits), 0);
   return {
     payload: {
       action: 'supplement', clientId: draft.localId, id: draft.serverId, round: draft.round,
       meta: { 입력시각: nowText, 조사자: draft.surveyor }, toilet, edits, replaceNA: replaceNA(TOILET), spaces,
     },
-    count, filledCount, editCount,
+    count, filledCount, editCount, userEditCount,
   };
 }
 
@@ -1114,6 +1117,35 @@ export function isSplitPage(page) {
 /** 나눠서 조사를 시작할 수 있는 조사인가: 아직 보내지 않은 새 조사(다시 조사 포함)만 */
 export function canSplit(draft) {
   return !!draft && draft.mode !== 'supplement' && draft.status === 'editing' && !draft.serverId;
+}
+
+/**
+ * '나눠서 조사 시작' 확인 창에서 적은 장애인 화장실 개수 확인 (칸 구성은 보낸 뒤 바꿀 수 없으므로 모두 필요).
+ * raw: { C1a: '1', … } → { values: { C1a: '1', … }(숫자 글자로 정리), missing: [code], invalid: [code] }
+ * 0 이상 정수만, 한 쪽에 MAX_MULTI_PER_SIDE 개까지 (화면도 그만큼만 만든다)
+ */
+export function checkSplitCounts(cfg, raw) {
+  const values = {};
+  const missing = [];
+  const invalid = [];
+  for (const code of Object.keys(MULTI_COUNT_CODES)) {
+    if (!cfg.byCode[code]) continue;
+    const s = String(raw?.[code] ?? '').trim();
+    if (s === '') missing.push(code);
+    else if (!/^\d+$/.test(s) || Number(s) > MAX_MULTI_PER_SIDE) invalid.push(code);
+    else values[code] = String(Number(s));
+  }
+  return { values, missing, invalid };
+}
+
+/** 확인 창에 미리 넣을 개수: 조사에 적어 둔 0 이상 정수만 (그 밖은 빈칸) */
+export function splitCountDefaults(draft) {
+  const out = {};
+  for (const code of Object.keys(MULTI_COUNT_CODES)) {
+    const s = String(draft.toilet?.[code] ?? '').trim();
+    out[code] = /^\d+$/.test(s) ? s : '';
+  }
+  return out;
 }
 
 /** 나누기 전에 꼭 적어야 하는 장애인 화장실 개수 중 빈 것 (칸 구성은 보낸 뒤 바꿀 수 없으므로) */

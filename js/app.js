@@ -1005,8 +1005,8 @@ async function renderPage() {
       <button class="btn small" id="fresh">🔄 다른 기기 값 불러오기</button>
       <div class="sub">${d.freshAt ? `시트 값 확인: ${dateText(d.freshAt).slice(11)}` : ''}</div></div>` : ''}
     ${copyFirstHtml(page)}
-    ${body}
     ${splitHtml(page)}
+    ${body}
     <div class="bottom-nav">
       <button class="btn nav" id="prev2" ${i === 0 ? 'disabled' : ''}>← 이전</button>
       ${page.type === 'review' ? '' : '<button class="btn nav primary" id="next2">다음 →</button>'}
@@ -1052,7 +1052,7 @@ async function copyFromFirst(page) {
 }
 
 // ---------- 나눠서 조사: 같은 조 다른 분과 한 화장실을 나눠 입력 ----------
-/** 장애인 화장실 개수 화면 아래: "나눠서 조사 시작" (아직 보내지 않은 새 조사에서만) */
+/** 장애인 화장실 개수 화면 맨 위: "나눠서 조사 시작" (아직 보내지 않은 새 조사에서만). 개수는 확인 창에서 함께 적는다 */
 function splitHtml(page) {
   if (!L.isSplitPage(page) || !L.canSplit(state.draft)) return '';
   return `<div class="split-start">
@@ -1061,39 +1061,94 @@ function splitHtml(page) {
   </div>`;
 }
 
-/** 나눠서 조사 확인 창: 남자·여자 화장실 있음/없음도 함께 묻는다. → { hasMale, hasFemale } 또는 null(취소) */
-function splitDialog(d, orphanN) {
+/**
+ * 나눠서 조사 확인 창: 장애인 화장실 개수 3가지(없음 = 0)와 남자·여자 화장실 있음/없음을 함께 묻는다.
+ * → { counts: { C1a: '1', … }, hasMale, hasFemale } 또는 null(취소)
+ */
+function splitDialog(d) {
   return new Promise((resolve) => {
+    const cfg = state.cfg;
+    const counts = L.splitCountDefaults(d);
     const pick = { hasMale: d.hasMale, hasFemale: d.hasFemale };
+    const codes = Object.keys(L.MULTI_COUNT_CODES).filter((c) => cfg.byCode[c]);
+    const num = (code) => {
+      const it = cfg.byCode[code];
+      return `<div class="item" data-sc="${code}"><div class="q"><label for="sc-${code}">${esc(it.question)}</label></div>
+      <div class="num-row"><input id="sc-${code}" class="text-input num" type="text" inputmode="numeric" pattern="[0-9]*" placeholder="숫자" data-scin="${code}" value="${esc(counts[code])}">${it.unit ? `<span class="unit">${esc(it.unit)}</span>` : ''}</div>
+      <button class="btn small na" data-scnone="${code}">없음</button></div>`;
+    };
     const q = (key, label) => `<div class="item"><div class="q">${label}</div>
       <div class="choices two">${[[true, '있음'], [false, '없음']].map(([v, t]) => `<button class="choice" data-sp="${key}" data-v="${v}">${t}</button>`).join('')}</div></div>`;
     const wrap = document.createElement('div');
     wrap.className = 'modal-wrap';
     wrap.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="mt">
       <h2 id="mt">나눠서 조사 시작</h2><div class="modal-body">
-      <p>지금까지 입력한 내용을 먼저 보냅니다. 같은 조(<b>${esc(d.surveyor)}</b>) 다른 분 휴대폰의 <b>'마저 해야 할 화장실'</b>에 이 화장실이 나타납니다. 맡은 쪽만 채우면 됩니다.</p>
+      <p>지금까지 입력한 내용을 먼저 보냅니다. 같은 조(<b>${esc(d.surveyor)}</b>) 다른 분 휴대폰의 오늘 목록(또는 <b>'마저 해야 할 화장실'</b>)에 이 화장실이 <b>빈칸</b>으로 나타납니다. 맡은 쪽만 채우면 됩니다.</p>
+      <p>칸 구성은 보낸 뒤 바꿀 수 없으니 먼저 적어 주세요.</p>
+      ${codes.map(num).join('')}
       ${q('hasMale', '남자화장실 있음?')}${q('hasFemale', '여자화장실 있음?')}
-      <div class="warn" id="splitWarn" hidden>남자화장실·여자화장실이 있는지 눌러 주세요.</div>
-      ${orphanN ? `<p>지금은 없는 칸에서 찍은 사진 ${orphanN}장은 올리지 않고 지웁니다.</p>` : ''}
+      <div class="warn" id="splitWarn" hidden></div>
       <p class="hint">다른 분은 같은 조(${esc(d.surveyor)})를 골라 두어야 이 화장실이 보입니다.</p></div>
       <div class="modal-buttons"><button class="btn" data-act="no">취소</button><button class="btn primary" data-act="yes">보내고 나눠서 하기</button></div></div>`;
-    const paint = () => wrap.querySelectorAll('[data-sp]').forEach((b) => {
-      const on = pick[b.dataset.sp] === (b.dataset.v === 'true');
-      b.classList.toggle('on', on);
-      b.setAttribute('aria-pressed', String(on));
+    const warn = wrap.querySelector('#splitWarn');
+    const paint = () => {
+      wrap.querySelectorAll('[data-sp]').forEach((b) => {
+        const on = pick[b.dataset.sp] === (b.dataset.v === 'true');
+        b.classList.toggle('on', on);
+        b.setAttribute('aria-pressed', String(on));
+      });
+      wrap.querySelectorAll('[data-scnone]').forEach((b) => {
+        const on = String(counts[b.dataset.scnone]).trim() === '0';
+        b.classList.toggle('on', on);
+        b.setAttribute('aria-pressed', String(on));
+      });
+    };
+    wrap.addEventListener('input', (e) => {
+      const inp = e.target.closest('[data-scin]');
+      if (!inp) return;
+      counts[inp.dataset.scin] = inp.value;
+      wrap.querySelector(`[data-sc="${inp.dataset.scin}"]`).classList.remove('flash');
+      warn.hidden = true;
+      paint();
     });
     wrap.addEventListener('click', (e) => {
       const c = e.target.closest('[data-sp]');
-      if (c) { pick[c.dataset.sp] = c.dataset.v === 'true'; wrap.querySelector('#splitWarn').hidden = true; paint(); return; }
+      if (c) { pick[c.dataset.sp] = c.dataset.v === 'true'; warn.hidden = true; paint(); return; }
+      const z = e.target.closest('[data-scnone]');
+      if (z) {
+        const code = z.dataset.scnone;
+        counts[code] = String(counts[code]).trim() === '0' ? '' : '0';
+        wrap.querySelector(`[data-scin="${code}"]`).value = counts[code];
+        warn.hidden = true;
+        paint();
+        return;
+      }
       const b = e.target.closest('[data-act]');
       if (!b) return;
-      if (b.dataset.act === 'yes' && (pick.hasMale == null || pick.hasFemale == null)) { wrap.querySelector('#splitWarn').hidden = false; return; }
+      if (b.dataset.act === 'yes') {
+        const chk = L.checkSplitCounts(cfg, counts);
+        const bad = [...chk.missing, ...chk.invalid];
+        const msgs = [];
+        if (chk.missing.length) msgs.push('장애인 화장실 개수를 모두 적어 주세요. 없으면 "없음"을 누르세요.');
+        if (chk.invalid.length) msgs.push('개수는 0~10 사이 숫자로 적어 주세요(소수점 없이).');
+        if (pick.hasMale == null || pick.hasFemale == null) msgs.push('남자화장실·여자화장실이 있는지 눌러 주세요.');
+        if (msgs.length) {
+          warn.innerHTML = msgs.map(esc).join('<br>');
+          warn.hidden = false;
+          wrap.querySelectorAll('[data-sc]').forEach((el) => el.classList.toggle('flash', bad.includes(el.dataset.sc)));
+          (wrap.querySelector(`[data-scin="${bad[0]}"]`) || warn).scrollIntoView({ block: 'center' });
+          return;
+        }
+        wrap.remove();
+        resolve({ counts: chk.values, ...pick });
+        return;
+      }
       wrap.remove();
-      resolve(b.dataset.act === 'yes' ? pick : null);
+      resolve(null);
     });
     paint();
     document.body.appendChild(wrap);
-    wrap.querySelector('[data-act="yes"]').focus();
+    wrap.querySelector('[data-act="yes"]').focus({ preventScroll: true });
   });
 }
 
@@ -1123,26 +1178,31 @@ async function startSplit(page) {
 }
 
 async function runSplit(d, page) {
-  const miss = L.splitMissingCounts(state.cfg, d);
-  if (miss.length) {
-    await modal('장애인 화장실 개수를 먼저 적어 주세요', `<p>나눠서 하려면 칸 구성을 먼저 정해야 합니다. 아래를 적은 뒤 다시 눌러 주세요.</p><ul>${miss.map((m) => `<li>${esc(m.question)}</li>`).join('')}</ul>`,
-      [{ label: '돌아가서 입력', value: true, primary: true }]);
-    focusItem(miss[0].ctx, miss[0].code);
-    return;
-  }
-  if (L.invalidAll(state.cfg, d).length) {
-    await modal('보낼 수 없습니다', '<p>"꼭 고쳐야 하는 숫자"가 있습니다. 확인과 제출 화면에서 먼저 고쳐 주세요. 길이는 cm 정수(소수점 없이)로 적습니다.</p>', [{ label: '확인', value: true, primary: true }]);
-    return;
-  }
   const offlineMsg = () => modal('인터넷이 필요합니다', '<p>나눠서 하려면 지금 입력한 내용을 먼저 보내야 합니다. 인터넷이 연결된 곳에서 다시 눌러 주세요.</p><p>입력한 내용은 휴대폰에 그대로 있습니다.</p>', [{ label: '확인', value: true, primary: true }]);
   if (!navigator.onLine) { await offlineMsg(); return; }
   await saveNow();
-  // 보낼 값은 사본으로 만든다: 실패하면 조사 기록은 그대로 둔다
-  const sk = L.buildSubmission(state.cfg, structuredClone(d), nowText());
+  const answer = await splitDialog(d);
+  if (!answer || state.draft !== d) return;
+  // 확인 창에서 적은 개수는 조사에도 넣는다 (보내지 못해도 남음)
+  const { counts, ...pick } = answer;
+  for (const [code, n] of Object.entries(counts)) {
+    if (String(d.toilet[code] ?? '') === n) continue;
+    L.setRaw(d, L.TOILET, code, n);
+    markTouched(L.TOILET, code);
+  }
+  await saveNow();
+  refreshPages();
+  if (L.invalidAll(state.cfg, d).length) {
+    await modal('보낼 수 없습니다', '<p>"꼭 고쳐야 하는 숫자"가 있습니다. 확인과 제출 화면에서 먼저 고쳐 주세요. 길이는 cm 정수(소수점 없이)로 적습니다.</p>', [{ label: '확인', value: true, primary: true }]);
+    keepScroll(renderPage);
+    return;
+  }
+  // 개수를 줄여 없어진 칸에서 찍은 사진은 올리지 않는다
+  const sk = L.buildSubmission(state.cfg, Object.assign(structuredClone(d), pick), nowText());
   const orphanN = (await photos.byDraft(d.localId)).filter((p) => p.spaceKey && !sk.spaceKeys.includes(p.spaceKey)).length;
-  const pick = await splitDialog(d, orphanN);
-  if (!pick || state.draft !== d) return;
-  if (!navigator.onLine) { await offlineMsg(); return; }
+  if (orphanN && !(await confirmBox('사진을 지웁니다', `<p>지금은 없는 칸에서 찍은 사진 ${orphanN}장은 올리지 않고 지웁니다.</p>`, '계속', '취소'))) { keepScroll(renderPage); return; }
+  if (state.draft !== d) return;
+  if (!navigator.onLine) { await offlineMsg(); keepScroll(renderPage); return; }
   const trial = Object.assign(structuredClone(d), pick);
   const { payload, spaceKeys } = L.buildSubmission(state.cfg, trial, nowText());
   delete payload.password;
@@ -1161,6 +1221,7 @@ async function runSplit(d, page) {
       closeBusy();
       await modal('보내지 못했습니다', `<p>${esc(e.message)}</p><p>입력한 내용은 휴대폰에 그대로 있습니다. 인터넷이 잘 되는 곳에서 "나눠서 조사 시작"을 다시 눌러 주세요. 같은 조사가 두 번 저장되지는 않습니다.</p>`,
         [{ label: '확인', value: true, primary: true }]);
+      if (state.draft === d && state.view === 'survey') keepScroll(renderPage); // 확인 창에서 적은 개수를 화면에도
       return;
     }
     // 서버에 실제로 들어간 값을 읽어 와서 이어서 할 보완을 만든다 (같은 번호로 이미 있던 경우 처음 보낸 값만 들어가 있음)
@@ -1337,7 +1398,7 @@ function reviewHtml(draftPhotos) {
     ${warns.length ? `<div class="card warnbox"><h2>확인이 필요한 답 ${warns.length}개</h2>
       ${warns.map(({ w, p }) => `<button class="btn list-btn" data-goto="${esc(p.id)}">${p.spaceLabel ? `[${esc(p.spaceLabel)}] ` : ''}${esc(w)}</button>`).join('')}</div>` : ''}
     ${d.mode === 'supplement'
-    ? `<div class="card"><p class="big-text">${(() => { const b = L.buildSupplementPayload(state.cfg, d, ''); return `새로 채운 칸 <b>${b.filledCount}개</b> · 고친 칸 <b>${b.editCount}개</b>`; })()} · 새 사진 ${draftPhotos.filter((p) => !p.prior).length}장</p></div>
+    ? `<div class="card"><p class="big-text">${(() => { const b = L.buildSupplementPayload(state.cfg, d, ''); return `새로 채운 칸 <b>${b.filledCount}개</b> · 고친 칸 <b>${b.userEditCount}개</b>`; })()} · 새 사진 ${draftPhotos.filter((p) => !p.prior).length}장</p></div>
       <button class="btn primary big" id="submit">보완 제출</button>
       <p class="hint">빈칸은 채우고, ✏️ 고치기로 고친 칸은 새 값으로 바꿉니다. 그사이 다른 기기가 같은 칸을 먼저 고쳤으면 그 칸은 바꾸지 않고 알려 드립니다.</p>`
     : `<button class="btn primary big" id="submit">제출하기</button>
@@ -1491,10 +1552,10 @@ async function submit() {
 }
 
 async function submitSupplement(d) {
-  const { payload, count, filledCount, editCount } = L.buildSupplementPayload(state.cfg, d, nowText());
+  const { payload, count, filledCount, userEditCount } = L.buildSupplementPayload(state.cfg, d, nowText());
   const newPhotos = (await photos.byDraft(d.localId)).length;
   if (!count && !newPhotos) { toast('새로 채우거나 고친 칸, 사진이 없습니다.'); return; }
-  const ok = await confirmBox('보완 제출할까요?', `<p>새로 채운 칸 <b>${filledCount}개</b>${editCount ? `, 고친 칸 <b>${editCount}개</b>` : ''}, 사진 ${newPhotos}장을 ${esc(d.serverId)} ${d.round}차 조사에 반영합니다.</p>`, '보완 제출', '취소');
+  const ok = await confirmBox('보완 제출할까요?', `<p>새로 채운 칸 <b>${filledCount}개</b>${userEditCount ? `, 고친 칸 <b>${userEditCount}개</b>` : ''}, 사진 ${newPhotos}장을 ${esc(d.serverId)} ${d.round}차 조사에 반영합니다.</p>`, '보완 제출', '취소');
   if (!ok) return;
   Object.assign(d, { submission: payload, status: 'queued', queuedAt: Date.now(), error: '' });
   await drafts.put(d);
