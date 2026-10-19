@@ -343,7 +343,7 @@ function assignCardHtml(a, allDrafts) {
     }
   }
   return withMapLink(`<button class="assign-main" data-assign="${esc(a.id)}">
-    <div class="row"><b class="grow">${L.orderLabel(a) ? `<span class="ord-no">${esc(L.orderLabel(a))}</span>` : ''}${esc(a.name)}</b>${chip}</div>
+    <div class="row">${L.orderLabel(a) ? `<b class="grow ord-name"><span class="ord-no">${esc(L.orderLabel(a))}</span><span class="ord-text">${esc(a.name)}</span></b>` : `<b class="grow">${esc(a.name)}</b>`}${chip}</div>
     ${addressLinesHtml(a)}${a.memo ? `<div class="sub">${esc(a.memo)}</div>` : ''}${todo}</button>`, a);
 }
 
