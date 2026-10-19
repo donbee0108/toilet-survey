@@ -306,7 +306,7 @@ function teamHtml(allDrafts) {
       }).join('')}</div>
       <p class="hint cal-legend">노란 날 = ${esc(teamLabel(team))} 활동일 · 초록 ✓ = 다 끝남 · 주황 = 빈칸 남음 · 굵은 테두리 = 오늘${week.includes(today) ? '' : ' <button class="linklike" id="wtoday">오늘로 돌아가기</button>'}</p>
     </div>`;
-  const list = teamItems.filter((a) => a.date === date);
+  const list = L.sortByOrder(teamItems.filter((a) => a.date === date)); // 배정 탭 '순서'대로
   const mine = list.length ? { list } : null;
   return `${chips}${cal}
     ${mine ? `<div class="team-group">
@@ -342,9 +342,26 @@ function assignCardHtml(a, allDrafts) {
       todo = '<div class="todo">▶ 눌러서 빈칸 채우기</div>';
     }
   }
-  return `<button class="card pick assign" data-assign="${esc(a.id)}">
-    <div class="row"><b class="grow">${esc(a.name)}</b>${chip}</div>
-    <div class="sub">${esc((a.road && a.road !== '-') ? a.road : (a.lot || ''))}${a.memo ? ` · ${esc(a.memo)}` : ''}</div>${todo}</button>`;
+  return withMapLink(`<button class="assign-main" data-assign="${esc(a.id)}">
+    <div class="row"><b class="grow">${L.orderLabel(a) ? `<span class="ord-no">${esc(L.orderLabel(a))}</span>` : ''}${esc(a.name)}</b>${chip}</div>
+    ${addressLinesHtml(a)}${a.memo ? `<div class="sub">${esc(a.memo)}</div>` : ''}${todo}</button>`, a);
+}
+
+/** 배정 카드 주소: 도로명 한 줄, 지번이 따로 있으면 한 줄 더. 둘 다 없으면 아무것도 안 보임 */
+function addressLinesHtml(a) {
+  const { road, lot } = L.assignAddress(a);
+  if (!road && !lot) return '';
+  return `<div class="addr-wrap">${road ? `<div class="sub addr addr-road">${esc(road)}</div>` : ''}${lot ? `<div class="sub addr addr-lot">${road ? '지번 ' : ''}${esc(lot)}</div>` : ''}</div>`;
+}
+
+/**
+ * 누르는 카드(button) + 그 아래 '네이버 지도' 링크. 링크를 버튼 안에 넣으면 안 되므로(눌렀을 때 조사가 열림)
+ * 바깥 div.card 안에 나란히 둔다.
+ */
+function withMapLink(buttonHtml, a) {
+  const url = L.naverMapUrl(a);
+  return `<div class="card assign assign-card${url ? ' has-map' : ''}">${buttonHtml}${url ? `
+    <div class="map-row"><a class="map-link" href="${esc(url)}" target="_blank" rel="noopener" title="네이버 지도" aria-label="${esc(a.name || '')} 네이버 지도에서 보기">📍</a></div>` : ''}</div>`;
 }
 
 /** 조 목록에 안 나온 화장실 한 곳 (이 휴대폰의 기록을 묶어 카드 한 장) */
@@ -400,9 +417,13 @@ function todoListHtml() {
     return g.drafts.some((d) => d.surveyor === teamLabel(team));
   };
   for (const g of state.groups.values()) if (!mineTeam(g)) seen.add(g.key);
-  const fillCard = (name, sub, tid, miss) => `<button class="card pick assign" data-fill="${esc(tid)}">
-    <div class="row"><b class="grow">${esc(name)}</b><span class="status s-blank">빈칸 ${miss}개</span></div>
-    ${sub ? `<div class="sub">${sub}</div>` : ''}<div class="todo">▶ 눌러서 빈칸 채우기</div></button>`;
+  // a(배정)가 있으면 주소와 네이버 지도 링크도 (배정이 아닌 곳은 주소를 따로 받지 않으므로 그대로)
+  const fillCard = (name, sub, tid, miss, a) => {
+    const body = `<div class="row"><b class="grow">${esc(name)}</b><span class="status s-blank">빈칸 ${miss}개</span></div>
+    ${sub ? `<div class="sub">${sub}</div>` : ''}${a ? addressLinesHtml(a) : ''}<div class="todo">▶ 눌러서 빈칸 채우기</div>`;
+    return a ? withMapLink(`<button class="assign-main" data-fill="${esc(tid)}">${body}</button>`, a)
+      : `<button class="card pick assign" data-fill="${esc(tid)}">${body}</button>`;
+  };
   // 1) 이 휴대폰에서 하다 만 것·전송 실패
   for (const g of state.groups.values()) {
     if (seen.has(g.key)) continue;
@@ -422,7 +443,7 @@ function todoListHtml() {
     const miss = st.kind === 'done' ? (st.missing ?? toiletMissing(st.tid)) : null;
     if (!(miss > 0)) continue;
     seen.add(key);
-    cards.push(fillCard(a.name, `${esc(dateLabel(a.date))} 조사`, st.tid, miss));
+    cards.push(fillCard(a.name, `${esc(dateLabel(a.date))} 조사`, st.tid, miss, a));
   }
   // 3) 이 휴대폰으로 보낸 목록 밖 화장실 중 빈칸 남은 곳
   for (const g of state.groups.values()) {

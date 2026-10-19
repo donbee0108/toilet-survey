@@ -939,7 +939,7 @@ export function assignmentsByTeam(items, date, lastTeam) {
   const num = (t) => (/^\d+$/.test(t) ? Number(t) : Infinity);
   return [...groups.entries()]
     .sort((x, y) => (x[0] === lastTeam ? -1 : y[0] === lastTeam ? 1 : (num(x[0]) - num(y[0])) || String(x[0]).localeCompare(String(y[0]))))
-    .map(([team, list]) => ({ team, list }));
+    .map(([team, list]) => ({ team, list: sortByOrder(list) }));
 }
 
 /** 배정에 나오는 모든 조 (숫자는 번호순, 글자는 뒤에) */
@@ -947,6 +947,54 @@ export function assignmentTeams(items) {
   const num = (t) => (/^\d+$/.test(t) ? Number(t) : Infinity);
   return [...new Set(items.map((a) => a.team).filter(Boolean))]
     .sort((x, y) => (num(x) - num(y)) || String(x).localeCompare(String(y)));
+}
+
+/**
+ * 배정 탭 '순서' 열대로 정렬: 숫자인 것 먼저(작은 수부터), 빈칸·글자는 그 뒤에 시트 줄 순서대로.
+ * 같은 순서끼리도 시트 줄 순서 유지 (안정 정렬). 원래 배열은 바꾸지 않음.
+ */
+export function sortByOrder(list) {
+  const num = (a) => {
+    const s = String(a?.order ?? '').trim();
+    const n = s === '' ? NaN : Number(s);
+    return Number.isFinite(n) ? n : Infinity;
+  };
+  return list.map((a, i) => ({ a, i, n: num(a) }))
+    .sort((x, y) => (x.n === y.n ? 0 : x.n - y.n) || (x.i - y.i))
+    .map((x) => x.a);
+}
+
+/** 배정 카드에 보일 주소: 도로명, 지번(도로명과 다를 때만). '-'는 빈칸으로 */
+export function assignAddress(a) {
+  const clean = (v) => { const s = String(v ?? '').trim(); return s === '-' ? '' : s; };
+  const road = fullAddress(clean(a?.road));
+  const lot = fullAddress(clean(a?.lot));
+  return { road, lot: lot && lot !== road ? lot : '' };
+}
+
+/** 조사 지역(서울 은평구)이 빠진 주소는 앞에 붙임: '응암동 200-5' → '서울 은평구 응암동 200-5' */
+export function fullAddress(s) {
+  if (!s) return '';
+  if (/^서울/.test(s)) return s;
+  return s.includes('은평구') ? `서울 ${s}` : `서울 은평구 ${s}`;
+}
+
+/** 배정 카드에 보일 순서 번호 (배정 탭 '순서'가 숫자일 때만, 아니면 '') */
+export function orderLabel(a) {
+  const s = String(a?.order ?? '').trim();
+  const n = Number(s);
+  return s !== '' && Number.isFinite(n) ? String(n) : '';
+}
+
+/**
+ * 네이버 지도 검색 주소: 도로명 → 없으면 지번. 화장실 이름으로는 찾지 않음 — 주소가 없으면 '' (지도 버튼 안 보임).
+ * 주소는 assignAddress 가 이미 '서울 은평구 …'까지 채워 둠 (다른 동네가 안 나오게)
+ */
+export function naverMapUrl(a) {
+  const { road, lot } = assignAddress(a);
+  const q = road || lot;
+  if (!q) return '';
+  return `https://map.naver.com/p/search/${encodeURIComponent(q)}`;
 }
 
 /** 'YYYY-MM-DD'에서 n일 이동 */
