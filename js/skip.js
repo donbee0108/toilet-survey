@@ -14,12 +14,25 @@
 //     → { ref, op: 'sideNeq', value } 남자·여자화장실 화면에서, 같은 쪽(또는 공용) 장애인 화장실 칸 중
 //       그 답인 칸이 하나도 없으면 건너뜀. 다른 화면에서는 건너뛰지 않음.
 //   문장 여러 개를 '; '로 이으면 하나라도 맞을 때 건너뜀 → { op: 'any', rules: [...] }
+//
+// v6 추가 (앞 질문이 아니라 장애인 화장실 칸의 쪽으로 판단):
+//   공용 장애인 화장실이면 건너뜀       → { op: 'sharedEq' }  남녀 공용 장애인 화장실 칸이면 건너뜀
+//   공용 장애인 화장실이 아니면 건너뜀  → { op: 'sharedNeq' } 남자 쪽·여자 쪽 장애인 화장실 칸이면 건너뜀
+//   공용 장애인 화장실이면 {코드}({문구})로 채움 → { op: 'sharedFill', value } 공용 칸이면 묻지 않고 그 값으로 저장
+//     (예: 공용 장애인 화장실은 늘 복도 밖 별도 공간 → C2 = SEPARATE)
 
 const PATTERNS = [
   { op: 'neq', re: /^\s*([A-Za-z0-9]+)의\s*답이\s*([A-Za-z0-9_]+)\s*\((.*?)\)\s*(?:가|이)\s*아니면\s*건너뜀\s*\.?\s*$/ },
   { op: 'eq', re: /^\s*([A-Za-z0-9]+)의\s*답이\s*([A-Za-z0-9_]+)\s*\((.*?)\)\s*이면\s*건너뜀\s*\.?\s*$/ },
   { op: 'lt', re: /^\s*([A-Za-z0-9]+)\s*이\(가\)\s*(-?\d+(?:\.\d+)?)\s*미만이면\s*건너뜀\s*\.?\s*$/ },
 ];
+
+const SHARED_FILL_RE = /^\s*공용\s*장애인\s*화장실이면\s*([A-Za-z0-9_]+)\s*\((.*?)\)\s*(?:으로|로)\s*채움\s*\.?\s*$/;
+const SHARED_RE = [
+  { op: 'sharedNeq', re: /^\s*공용\s*장애인\s*화장실이\s*아니면\s*건너뜀\s*\.?\s*$/ },
+  { op: 'sharedEq', re: /^\s*공용\s*장애인\s*화장실이면\s*건너뜀\s*\.?\s*$/ },
+];
+export const isSharedRule = (rule) => rule?.op === 'sharedEq' || rule?.op === 'sharedNeq' || rule?.op === 'sharedFill';
 
 const SIDE_RE = /^\s*이\s*쪽\s*장애인\s*화장실\s*([A-Za-z0-9]+)의\s*답이\s*([A-Za-z0-9_]+)\s*\((.*?)\)\s*(?:가|이)\s*아니면\s*건너뜀\s*\.?\s*$/;
 
@@ -37,6 +50,10 @@ export function parseSkip(text) {
 }
 
 function parseOne(s) {
+  const fill = s.match(SHARED_FILL_RE);
+  if (fill) return { op: 'sharedFill', value: fill[1], label: fill[2], text: s };
+  const shared = SHARED_RE.find(({ re }) => re.test(s));
+  if (shared) return { op: shared.op, text: s };
   const side = s.match(SIDE_RE);
   if (side) return { ref: side[1], op: 'sideNeq', value: side[2], label: side[3], text: s };
   for (const { op, re } of PATTERNS) {
@@ -80,6 +97,13 @@ export function validateSkips(items, choices) {
     if (!parsed) continue;
     if (parsed.error) { problems.push(`${it.code}: ${parsed.error}`); continue; }
     for (const rule of ruleList(parsed)) {
+    if (isSharedRule(rule)) {
+      if (it.tab !== '공간' || it.scope !== '장애인화장실') problems.push(`${it.code}: '공용 장애인 화장실' 조건은 장애인 화장실 칸에서만 묻는 항목에 씁니다`);
+      else if (rule.op === 'sharedFill' && !(choices[it.list] || []).some((c) => c.value === rule.value)) {
+        problems.push(`${it.code}: 채울 값 ${rule.value}가 이 항목의 선택지(${it.list || '없음'})에 없습니다`);
+      }
+      continue;
+    }
     const ref = byCode.get(rule.ref);
     if (!ref) { problems.push(`${it.code}: 조건의 항목코드 ${rule.ref}가 항목정의에 없습니다`); continue; }
     if (rule.op === 'sideNeq' && (ref.tab !== '공간' || !['장애인화장실', '장애인·남·여'].includes(ref.scope))) {

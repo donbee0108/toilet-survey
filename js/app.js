@@ -16,6 +16,13 @@ const ls = {
   get: (k) => { try { return localStorage.getItem(k) || ''; } catch { return ''; } },
   set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* 무시 */ } },
 };
+// 이번에 연 앱에서만 기억하는 값 (앱을 껐다 켜면 지워짐, 새로 고침·자동 업데이트로 다시 열 때는 남음).
+// 저장소를 못 쓰는 브라우저면 메모리에만 둔다.
+const memSession = {};
+const ss = {
+  get: (k) => { try { return sessionStorage.getItem(k) || ''; } catch { return memSession[k] || ''; } },
+  set: (k, v) => { try { sessionStorage.setItem(k, v); } catch { memSession[k] = v; } },
+};
 const pad = (n) => String(n).padStart(2, '0');
 function nowText(t = new Date()) {
   return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())} ${pad(t.getHours())}:${pad(t.getMinutes())}`;
@@ -29,7 +36,13 @@ function saveSoon() {
 }
 async function saveNow() {
   clearTimeout(saveTimer);
-  if (state.draft && state.draft.status === 'editing') await drafts.put(state.draft);
+  const d = state.draft;
+  if (!d || d.status !== 'editing') return;
+  // 다른 창(예전에 열어 둔 탭)에서 그사이 보냈거나 정리·삭제된 기록이면 '입력 중'으로 되살리지 않는다
+  // (조사 기록은 화면에 열기 전에 늘 먼저 저장되므로, 저장소에 없으면 다른 곳에서 지운 것)
+  const stored = await drafts.get(d.localId);
+  if (!stored || stored.status !== 'editing' || stored.compact) return;
+  await drafts.put(d);
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveNow(); });
 window.addEventListener('pagehide', saveNow);
@@ -40,6 +53,54 @@ function toast(msg) {
   document.body.appendChild(el);
   setTimeout(() => el.remove(), 3000);
 }
+
+// ---------- 새 앱 파일 자동 반영 ----------
+// 새 서비스워커가 앱을 맡으면(새 앱 파일을 다 받아 둠) 한 번 새로 고친다.
+// 처음 화면·목록 화면이면 바로, 조사 화면 도중이면 처음 화면으로 돌아올 때 (입력은 자동 저장되지만 화면을 갑자기 바꾸지 않음).
+const UPDATE_RELOAD_GAP_MS = 30000; // 새로 고친 지 얼마 안 됐으면 다시 고치지 않음 (계속 새로 고치는 일 방지)
+let swReg = null;
+let swCheckedAt = 0;
+function watchAppUpdate() {
+  if (!('serviceWorker' in navigator)) return;
+  const sw = navigator.serviceWorker;
+  let controlled = !!sw.controller; // 처음 설치(맡던 서비스워커가 없음)는 이미 새 파일이라 새로 고치지 않음
+  sw.addEventListener('controllerchange', () => {
+    if (!controlled) { controlled = true; return; }
+    state.updateReady = true;
+    reloadForUpdate();
+  });
+  sw.register('sw.js').then((r) => { swReg = r; swCheckedAt = Date.now(); return r.update(); }).catch(() => {});
+  // 앱을 닫지 않고 다시 볼 때도 새 앱이 있는지 확인 (1분에 한 번까지)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible' || !swReg || !navigator.onLine || Date.now() - swCheckedAt < 60000) return;
+    swCheckedAt = Date.now();
+    swReg.update().catch(() => {});
+  });
+}
+
+/**
+ * 새 앱이 준비됐고 조사 화면이 아니면 새로 고친다. 고쳤으면(고치는 중이면) true.
+ * 확인 창·'확인 중…' 덮개가 떠 있거나 다른 화면으로 넘어가는 중이면 미룬다 (처음 화면을 다시 그릴 때·넘어가기가 끝날 때 다시 봄)
+ */
+function reloadForUpdate() {
+  if (!state.updateReady || state.view === 'survey') return false;
+  if (state.navBusy > 0 || document.querySelector('.modal-wrap')) return false;
+  const last = Number(ss.get('ts.updateReloadAt')) || 0;
+  if (Date.now() - last < UPDATE_RELOAD_GAP_MS) { state.updateReady = false; return false; }
+  ss.set('ts.updateReloadAt', String(Date.now()));
+  state.updateReady = false;
+  saveNow().finally(() => location.reload());
+  return true;
+}
+
+/** 서버를 기다렸다가 다른 화면으로 넘어가는 동안은 새 앱 새로 고침을 미룬다 */
+const navTask = (fn) => async (...args) => {
+  state.navBusy = (state.navBusy || 0) + 1;
+  try { return await fn(...args); } finally {
+    state.navBusy--;
+    setTimeout(reloadForUpdate, 0);
+  }
+};
 
 /** 확인 창. buttons: [{label, value, primary}] → 누른 버튼의 value */
 function modal(title, bodyHtml, buttons) {
@@ -62,27 +123,51 @@ function modal(title, bodyHtml, buttons) {
 const confirmBox = (title, body, yes = '예', no = '아니오') => modal(title, body, [{ label: no, value: false }, { label: yes, value: true, primary: true }]);
 
 // ---------- 설정 불러오기 ----------
+// 기기에 저장된 조사 항목이 있으면 그것으로 바로 시작하고, 인터넷이 되면 뒤에서 새로 받아
+// 달라졌으면 바꾼 뒤 알려 준다(조사 화면 도중이면 처음 화면으로 돌아올 때 바꿈). 저장본이 없거나 직접 누르면 받을 때까지 기다림.
+const configKey = (d) => JSON.stringify([d.version, d.items, d.choices, d.headers]);
 async function loadConfig({ force = false } = {}) {
   const cached = await kv.get('config');
-  if (cached && !force && Array.isArray(cached.data?.items)) useConfig(cached.data, cached.fetchedAt, true);
+  const haveCache = !!cached && Array.isArray(cached.data?.items);
+  if (haveCache && !force) useConfig(cached.data, cached.fetchedAt, true);
   if (!navigator.onLine || !apiUrl()) { loadAssignments(); return; } // 인터넷이 없으면 저장된 배정 목록만
+  if (haveCache && !force) {
+    fetchConfig({ cached, force }).then(() => { if (state.needPw && state.view === 'home') renderHome(); });
+    loadAssignments();
+    return;
+  }
+  await fetchConfig({ cached: haveCache ? cached : null, force });
+  if (!state.needPw) loadAssignments();
+}
+
+async function fetchConfig({ cached, force }) {
   try {
     const data = await call('config');
     if (!Array.isArray(data.items)) throw new Error('서버에서 조사 항목을 받지 못했습니다. 잠시 뒤 다시 열어 주세요.');
     state.needPw = false;
-    await kv.set('config', { data, fetchedAt: Date.now() });
-    useConfig(data, Date.now(), false);
-    if (force) toast('조사 항목을 새로 불러왔습니다.');
+    const now = Date.now();
+    await kv.set('config', { data, fetchedAt: now });
+    const changed = !!cached && !force && configKey(data) !== configKey(cached.data);
+    if (changed && state.view === 'survey') {
+      state.pendingCfg = { data, fetchedAt: now }; // 조사 화면 도중에는 문항을 바꾸지 않음
+    } else if (changed || force || !cached || !state.cfg) {
+      useConfig(data, now, false);
+      state.pendingCfg = null;
+      if (force) toast('조사 항목을 새로 불러왔습니다.');
+      else if (changed) { toast('조사 항목이 새로 바뀌었습니다.'); if (state.view === 'home') renderHome(); }
+    } else if (state.cfgInfo) {
+      Object.assign(state.cfgInfo, { fetchedAt: now, fromCache: false }); // 같은 내용: 받은 시각만
+    }
   } catch (e) {
     // 서버에 비밀번호가 걸려 있을 때만 비밀번호 칸을 보여 준다 (경고 대신 안내)
     if (/비밀번호/.test(e.message)) { state.needPw = true; return; }
     if (!cached || force) state.cfgError = e.message;
   }
-  loadAssignments();
 }
 
 // ---------- 배정 목록 ----------
 async function loadAssignments() {
+  if (navigator.onLine && apiUrl()) homeFetchAt = Date.now();
   const cached = await kv.get('assignments');
   if (Array.isArray(cached?.items)) { state.assignments = cached.items; state.assignmentsReady = true; state.assignmentsAt = cached.startedAt || 0; }
   if (!navigator.onLine || !apiUrl()) { state.assignmentsReady = true; return; }
@@ -109,6 +194,27 @@ async function loadToiletInfo() {
     await kv.set('toilets', { items, fetchedAt: Date.now() });
   } catch { /* 저장된 사본을 씀 */ }
 }
+// 첫 화면을 열거나 돌아올 때, 앱을 다시 볼 때 목록(배정·빈칸 수)을 새로 받는다 — 같은 조 다른 분이 보낸 화장실이 곧 보이도록.
+// 서버에 부담이 가지 않게 25초에 한 번까지만.
+// 휴대폰 30대가 함께 써도 Apps Script가 버티도록: 30초(보내는 중이면 60초)에 한 번까지, 배정 목록은 다시 받지 않고
+// 빈칸 수(listToilets)만 받아 배정의 '제출됨' 정보에 합친다. 배정 목록 자체는 앱을 열 때·인터넷이 다시 될 때 받는다.
+const HOME_REFRESH_MS = 30000;
+const HOME_REFRESH_BUSY_MS = 60000;
+let homeFetchAt = 0;
+function refreshHomeSoon() {
+  const gap = state.queueBusy ? HOME_REFRESH_BUSY_MS : HOME_REFRESH_MS;
+  if (!navigator.onLine || !apiUrl() || Date.now() - homeFetchAt < gap) return;
+  refreshToilets();
+}
+async function refreshToilets() {
+  if (!navigator.onLine || !apiUrl()) return;
+  homeFetchAt = Date.now();
+  await loadToiletInfo();
+  L.mergeToiletInfo(state.assignments || [], state.toiletInfo || []);
+  if (state.view === 'home') renderHome();
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && state.view === 'home') refreshHomeSoon(); });
+
 const toiletMissing = (tid) => {
   const t = (state.toiletInfo || []).find((x) => x.id === tid);
   return t && typeof t.missing === 'number' ? t.missing : null;
@@ -131,7 +237,8 @@ const ASSIGN_TEXT = { todo: '조사 전', editing: '입력 중', queued: '제출
 
 // 조: '3' → '3조', 글자는 그대로. 고른 조가 조사자로 기록된다.
 const teamLabel = (t) => (/^\d+$/.test(String(t || '')) ? `${t}조` : String(t || ''));
-const currentTeam = () => ls.get('ts.lastTeam');
+// 고른 조는 이번에 연 앱에서만 기억한다: 앱을 새로 열면 조를 다시 고른다(한 사람이 여러 조에서 활동)
+const currentTeam = () => ss.get('ts.team');
 
 /** 조 버튼: 고르기 전엔 5칸씩 번호판, 고른 뒤엔 한 줄로 접힘("3조 · 조 바꾸기"). 오늘 배정 있는 조는 노랗게 */
 function teamChipsHtml(teams, team, activeToday) {
@@ -139,7 +246,7 @@ function teamChipsHtml(teams, team, activeToday) {
     return `<div class="team-picked"><span class="team-now">${esc(teamLabel(team))}</span>
       <button class="btn" id="changeTeam">조 바꾸기</button></div>`;
   }
-  return `<h2 class="sec">오늘 활동하는 조를 눌러 주세요</h2>
+  return `<h2 class="sec">오늘 활동하는 조를 눌러 주세요</h2>${team ? '' : '<p class="hint">앱을 열 때마다 조를 다시 고릅니다.</p>'}
     <div class="team-chips">${teams.map((t) => `<button class="team-chip ${t === team ? 'on' : ''} ${activeToday.has(t) ? 'today' : ''}" data-team="${esc(t)}" aria-pressed="${t === team}">${esc(teamLabel(t))}</button>`).join('')}</div>
     <p class="hint cal-legend">${activeToday.size ? '노란 조 = 오늘 활동이 있는 조 · ' : ''}고른 조가 조사자로 기록됩니다</p>`;
 }
@@ -254,6 +361,7 @@ function otherCardHtml(g) {
   const errs = [];
   if (m.failed) errs.push(`${esc(m.failed.error || '보내지 못했습니다')} — 위 "지금 다시 보내기"를 눌러 주세요.`);
   if (m.lastSupp?.result?.conflicts?.length) errs.push(`다른 기기가 먼저 고쳐서 못 고친 칸 ${m.lastSupp.result.conflicts.length}개 — 보완을 다시 열어 확인해 주세요.`);
+  if (m.lastSupp?.result?.skipped?.length) errs.push(`이미 값이 있어 저장되지 않은 칸 ${m.lastSupp.result.skipped.length}개 — 같은 칸을 다른 분이 먼저 채웠을 수 있습니다. 보완을 다시 열어 확인해 주세요.`);
   if (m.lastSupp?.result?.editsIgnored) errs.push(`고친 칸 ${m.lastSupp.result.editsIgnored}개가 반영되지 않았습니다 — 관리자에게 알려 주세요.`);
   for (const d of g.drafts) if (d.warnings?.length) errs.push(`시트에 열이 없어 저장되지 않은 값: ${esc(d.warnings.join(', '))} — 관리자에게 알려 주세요.`);
   let actions = '';
@@ -263,7 +371,7 @@ function otherCardHtml(g) {
   } else if (m.supp) {
     lines.push(`보완 입력 중 · ${dateText(m.supp.updatedAt)} 저장 — 끝나면 "보완 제출"을 눌러 주세요`);
     actions = `<button class="btn primary" data-open="${m.supp.localId}">보완 이어서</button><button class="btn danger small" data-del="${m.supp.localId}">삭제</button>`;
-  } else if (m.kind === 'done' && m.sent?.submission) {
+  } else if (m.kind === 'done' && m.sent?.serverId) {
     actions = `<button class="btn" data-supp="${m.sent.localId}">보완하기</button>`;
   }
   return `<div class="card other">
@@ -300,7 +408,7 @@ function todoListHtml() {
     if (seen.has(g.key)) continue;
     const sm = L.groupSummary(g);
     // 마지막 보완이 다 반영되지 못했으면(다른 기기와 겹침·서버 갱신 전) 확인하도록 남겨 둔다
-    const suppTrouble = sm.kind === 'done' && sm.lastSupp === g.drafts[0] && (sm.lastSupp.result?.conflicts?.length || sm.lastSupp.result?.editsIgnored);
+    const suppTrouble = sm.kind === 'done' && sm.lastSupp === g.drafts[0] && (sm.lastSupp.result?.conflicts?.length || sm.lastSupp.result?.skipped?.length || sm.lastSupp.result?.editsIgnored);
     if (!['failed', 'editing', 'supp'].includes(sm.kind) && !suppTrouble) continue;
     seen.add(g.key);
     const a = g.assignId && (state.assignments || []).find((x) => x.id === g.assignId);
@@ -325,10 +433,16 @@ function todoListHtml() {
     seen.add(g.key);
     cards.push(fillCard(m.name, '', m.tid, miss));
   }
+  // 4) 같은 조가 다른 휴대폰으로 보낸 화장실 중 빈칸 남은 곳 (나눠서 조사할 때 여기서 열어 맡은 쪽을 채움)
+  const skip = new Set([...state.groups.values()].map((g) => g.tid).filter(Boolean));
+  for (const a of state.assignments || []) for (const x of a.done || []) skip.add(x.tid); // 배정 화장실은 위 2)·조 목록에서
+  for (const t of L.teamBlankToilets(state.toiletInfo, { surveyor: teamLabel(team), today: todayText(), skip })) {
+    cards.push(fillCard(t.name || '(이름 없음)', `${esc(dateLabel(String(t.time).slice(0, 10)))} ${esc(t.surveyor)} 조사`, t.id, t.missing));
+  }
   return cards.join('');
 }
 
-async function openAssignment(id) {
+const openAssignment = navTask(async (id) => {
   const a = (state.assignments || []).find((x) => x.id === id);
   if (!a) return;
   const st = L.assignmentStatus(a, await drafts.all(), { serverAt: state.assignmentsAt });
@@ -349,20 +463,61 @@ async function openAssignment(id) {
     }
     return;
   }
+  if (st.kind === 'todo' && navigator.onLine && apiUrl()) {
+    const closeBusy = busyOverlay('확인 중…');
+    let fresh = null;
+    const startedAt = Date.now();
+    try { fresh = await call('assignments', {}, { timeoutMs: 8000 }); } catch { /* 확인 못 하면 그대로 시작 */ } finally { closeBusy(); }
+    if (Array.isArray(fresh?.items)) {
+      state.assignments = fresh.items;
+      state.assignmentsAt = startedAt;
+      await kv.set('assignments', { items: fresh.items, fetchedAt: Date.now(), startedAt });
+      const a2 = fresh.items.find((x) => x.id === id);
+      const st2 = a2 && L.assignmentStatus(a2, await drafts.all(), { serverAt: startedAt });
+      if (st2?.kind === 'done') {
+        toast('같은 조에서 이미 보낸 화장실입니다. 빈칸 채우기로 엽니다.');
+        return startSupplementFromServer(st2.tid);
+      }
+    }
+  }
   await begin(L.draftFromAssignment(a, { surveyor: teamLabel(currentTeam()) }));
-}
+});
 function useConfig(data, fetchedAt, fromCache) {
   state.cfg = L.prepareConfig(structuredClone(data));
   state.cfgInfo = { fetchedAt, fromCache, count: data.items.length, version: data.version, problems: [...validateSkips(data.items, data.choices), ...L.headerProblems(state.cfg)] };
   state.cfgError = '';
+  cleanDrafts().catch(() => {});
 }
+
+/**
+ * 조사 항목이 바뀌었을 때: 입력 중인 조사에서 지금 보기에 없는 선택 답(예: 예전 점자 표지 '있음')을 지운다.
+ * 보완의 저장된 시트 값은 그대로 둔다 (logic.js cleanDraftChoices). 바뀌지 않았으면 아무것도 하지 않음
+ */
+async function cleanDrafts() {
+  const cfg = state.cfg;
+  if (state.draft?.status === 'editing' && L.cleanDraftChoices(cfg, state.draft)) saveSoon();
+  for (const d of await drafts.all()) {
+    if (d.status !== 'editing' || cfg !== state.cfg) continue;
+    if (d.localId === state.draft?.localId) continue; // 열린 조사는 위에서 (화면의 값과 어긋나지 않게)
+    if (L.cleanDraftChoices(cfg, d) && d.localId !== state.draft?.localId) await drafts.put(d);
+  }
+}
+
 
 // ---------- 홈 ----------
 const STATUS_TEXT = { queued: '전송 대기', sending: '보내는 중', photos: '사진 보내는 중', done: '전송 완료', failed: '전송 실패' };
 
 async function renderHome() {
+  const arriving = state.view !== 'home'; // 다른 화면에서 첫 화면으로 왔을 때만 목록을 새로 받는다 (전송 진행으로 다시 그릴 때는 아님)
   state.view = 'home';
   state.draft = null;
+  // 조사 화면 도중에 미뤄 둔 것: 새 앱 파일이면 새로 고치고, 새 조사 항목이면 이제 바꾼다
+  if (reloadForUpdate()) return;
+  if (state.pendingCfg) {
+    useConfig(state.pendingCfg.data, state.pendingCfg.fetchedAt, false);
+    state.pendingCfg = null;
+    toast('조사 항목이 새로 바뀌었습니다.');
+  }
   const all = (await drafts.all()).sort((a, b) => b.updatedAt - a.updatedAt);
   const allPhotos = await photos.all();
   const photoStat = (id) => {
@@ -371,6 +526,7 @@ async function renderHome() {
   };
   const failedN = all.filter((d) => d.status === 'failed').length;
   const sendingN = all.filter((d) => ['queued', 'sending', 'photos'].includes(d.status)).length;
+  state.queueBusy = sendingN > 0;
   // 한 화장실은 첫 화면에 한 번만: 기록을 화장실 단위로 묶고, 조 목록 카드에 나온 화장실은 아래에서 뺀다
   state.groups = L.groupByToilet(all, state.assignments || []);
   state.shownKeys = new Set();
@@ -419,7 +575,7 @@ async function renderHome() {
       <button class="btn" id="reload">조사 항목 새로 불러오기</button>
       <button class="btn" id="resetpw">비밀번호 다시 입력</button>
       <button class="btn" id="clean">완료된 기록 정리</button>
-      <p class="hint">"완료된 기록 정리"는 다 보낸 조사를 이 휴대폰에서만 지웁니다. 시트에는 그대로 남습니다.</p>
+      <p class="hint">다 보낸 조사(사진 포함)는 저절로 이 휴대폰에서 지워집니다. 시트에는 그대로 남습니다. "완료된 기록 정리"는 남은 '보냄' 표시까지 바로 지울 때만 누르면 됩니다.</p>
     </details>
   </main>`;
 
@@ -441,7 +597,7 @@ async function renderHome() {
     document.querySelector('.team-chip')?.focus();
     return true;
   };
-  $app.querySelectorAll('[data-team]').forEach((b) => { b.onclick = () => { ls.set('ts.lastTeam', b.dataset.team); state.pickTeam = false; renderHome(); }; });
+  $app.querySelectorAll('[data-team]').forEach((b) => { b.onclick = () => { ss.set('ts.team', b.dataset.team); state.pickTeam = false; renderHome(); }; });
   document.getElementById('changeTeam')?.addEventListener('click', () => { state.pickTeam = true; renderHome(); });
   document.getElementById('new').onclick = () => { if (!needName()) startNew(); };
   document.getElementById('supplement').onclick = () => { if (!needName()) renderResurvey('supplement'); };
@@ -480,6 +636,7 @@ async function renderHome() {
   document.getElementById('wtoday')?.addEventListener('click', () => { state.calWeek = state.assignDate = todayText(); renderHome(); });
   $app.querySelectorAll('[data-day]').forEach((b) => { b.onclick = () => { state.assignDate = b.dataset.day; renderHome(); }; });
   $app.querySelectorAll('[data-assign]').forEach((b) => { b.onclick = () => { if (!needName()) openAssignment(b.dataset.assign); }; });
+  if (arriving) refreshHomeSoon();
 }
 
 // ---------- 재조사 목록 ----------
@@ -540,14 +697,15 @@ async function renderResurvey(mode = 'resurvey') {
     draw();
   } catch (e) {
     // 인터넷이 없으면: 이 휴대폰으로 보낸 조사만 (그 기록으로 고치기 시작 가능)
-    const mine = supp ? all.filter((d) => d.mode !== 'supplement' && d.status === 'done' && d.submission && d.serverId) : [];
+    // 다 보내 정리된 조사(보냄 기록)는 목록에만 보이고 인터넷이 연결된 뒤 열 수 있다
+    const mine = supp ? all.filter((d) => d.mode !== 'supplement' && d.status === 'done' && d.serverId && (d.submission || d.compact)) : [];
     listEl.innerHTML = `<div class="warn">${esc(e.message)} — 전체 목록은 인터넷이 연결된 곳에서 볼 수 있습니다.${mine.length ? ' 아래는 이 휴대폰으로 보낸 조사입니다.' : ''}</div>
-      ${mine.map((d) => `<button class="card pick" data-local="${esc(d.localId)}"><b>${esc(d.toilet.B0a || '(이름 없음)')}</b><div class="sub">${dateText(d.queuedAt)} 보냄</div></button>`).join('')}`;
+      ${mine.map((d) => `<button class="card pick" data-local="${esc(d.localId)}"><b>${esc(d.toilet?.B0a || '(이름 없음)')}</b><div class="sub">${dateText(d.queuedAt)} 보냄${d.submission ? '' : ' · 인터넷 연결 후 열 수 있음'}</div></button>`).join('')}`;
     listEl.querySelectorAll('[data-local]').forEach((b) => { b.onclick = () => startSupplementFromLocal(b.dataset.local); });
   }
 }
 
-async function startResurvey(id, extra = {}) {
+const startResurvey = navTask(async (id, extra = {}) => {
   let prev;
   try { prev = await call('getToilet', { id }); } catch (e) { toast(e.message); return; }
   const d = L.newDraft({ surveyor: teamLabel(currentTeam()), resurveyOf: id });
@@ -555,7 +713,7 @@ async function startResurvey(id, extra = {}) {
   d.prevRound = prev.round;
   Object.assign(d, extra); // 배정 목록에서 다시 조사하면 배정번호를 이어서 저장
   await begin(d);
-}
+});
 
 // ---------- 함께 조사: 다른 기기가 제출한 값 불러오기 ----------
 const FRESH_EVERY_MS = 30000;
@@ -609,25 +767,36 @@ async function pullFresh({ manual }) {
   if (state.view === 'survey' && state.draft === d && d.pageId === pageBefore && (manual || res.added || res.conflicts.length)) keepScroll(renderPage);
 }
 
-async function startSupplementFromServer(id) {
+const startSupplementFromServer = navTask(async (id) => {
   let prev;
   try { prev = await call('getToilet', { id }); } catch (e) { toast(e.message); return; }
   await beginSupplement(prev, { fromServer: true });
-}
+});
 
-async function startSupplementFromLocal(localId) {
+const startSupplementFromLocal = navTask(async (localId) => {
   const d0 = await drafts.get(localId);
-  if (!d0?.submission) { toast('이 조사의 제출 기록을 찾지 못했습니다.'); return; }
+  if (!d0?.serverId) { toast('이 조사의 제출 기록을 찾지 못했습니다.'); return; }
+  // 다 보낸 조사는 휴대폰에서 정리돼 시트에서만 불러올 수 있다
+  if (!d0.submission && !navigator.onLine) { toast('보낸 조사는 인터넷이 연결된 곳에서 열 수 있습니다.'); return; }
   // 인터넷이 되면 시트의 최신 값으로 시작한다 (다른 휴대폰에서 이미 보완했을 수 있으므로)
   if (navigator.onLine) {
     try {
       const prev = await call('getToilet', { id: d0.serverId });
       if (Number(prev.round) === Number(d0.round)) { await beginSupplement(prev, { fromServer: true }); return; }
-    } catch { /* 아래 기기 기록으로 */ }
+      if (!d0.submission) {
+        // 그사이 다시 조사돼 차수가 바뀜 → 시트의 최신 차수로 연다
+        toast(`이 화장실은 그사이 다시 조사되었습니다. 최신(${prev.round}차) 조사로 엽니다.`);
+        await beginSupplement(prev, { fromServer: true });
+        return;
+      }
+    } catch (e) {
+      if (!d0.submission) { toast(`시트에서 불러오지 못했습니다: ${e.message}`); return; }
+    }
   }
+  if (!d0.submission) { toast('시트에서 이 조사를 불러오지 못했습니다. 잠시 뒤 다시 눌러 주세요.'); return; }
   toast('인터넷이 없어 휴대폰에 남은 기록으로 시작합니다. 이미 채워진 칸은 시트에서 그대로 둡니다.');
   await beginSupplement(L.rowsFromSubmitted(d0));
-}
+});
 
 async function beginSupplement(rows, { fromServer = false } = {}) {
   if (!(Number(rows.round) >= 1)) { toast('이 화장실의 조사차수를 알 수 없어 보완할 수 없습니다. 관리자에게 알려 주세요.'); return; }
@@ -693,6 +862,7 @@ function enterSurvey() {
 
 window.addEventListener('popstate', () => {
   if (state.view !== 'survey') return;
+  if (splitting) { history.pushState({ survey: true }, ''); return; } // 나눠서 보내는 중에는 화면을 떠나지 않음
   const i = L.pageIndex(state.pages, state.draft.pageId);
   if (i > 0) { history.pushState({ survey: true }, ''); goTo(i - 1, false); } else { saveNow().then(renderHome); }
 });
@@ -706,6 +876,19 @@ function bannerClass(ctx) {
   if (ctx === L.FE) return 'sb-female';
   const side = L.spaceInfo(state.draft, ctx)?.side;
   return { MALE: 'sb-multi-male', FEMALE: 'sb-multi-female', SHARED: 'sb-multi-shared' }[side] || '';
+}
+
+/** 상단에 고정되는 "지금 조사하는 곳" 띠: 1줄 공간(색), 2줄 화면 제목.
+ *  화장실 전체 문항은 노랑, 공간 문항은 공간 색, 시작·확인 화면은 제목만 (무채색) */
+function whereBarHtml(page) {
+  const group = page.spaceLabel || (page.type === 'items' || page.type === 'presence' ? '화장실 전체' : '');
+  // 1줄에 "장애인 화장실"이 이미 있으면 2줄의 같은 말은 눈으로만 줄인다 (글자는 남겨 둠)
+  const m = page.spaceLabel?.includes('장애인 화장실') ? /^(\S+ )(장애인 화장실: )(.+)$/.exec(page.title) : null;
+  const title = m ? `${esc(m[1])}<span class="vh">${esc(m[2])}</span>${esc(m[3])}` : esc(page.title);
+  const cls = page.spaceLabel ? bannerClass(page.ctx) : group ? 'wb-whole' : 'wb-plain';
+  const line1 = page.spaceLabel ? `<div class="space-banner">${esc(page.spaceLabel)}</div>`
+    : group ? `<div class="wb-group">${esc(group)}</div>` : '';
+  return `<div class="where-bar ${cls}">${line1}<h1 class="page-title">${title}</h1></div>`;
 }
 
 /** 그 문항으로 스크롤하고 잠깐 강조한다 */
@@ -768,7 +951,9 @@ async function renderPage() {
   const i = L.pageIndex(state.pages, page.id);
   const total = state.pages.length;
   const pct = Math.round((i / (total - 1)) * 100);
-  const draftPhotos = await photos.byDraft(d.localId);
+  const ownPhotos = await photos.byDraft(d.localId);
+  const priorPhotos = d.splitFrom ? (await photos.byDraft(d.splitFrom)).filter((p) => p.status !== 'lost').map((p) => ({ ...p, prior: true })) : [];
+  const draftPhotos = [...priorPhotos, ...ownPhotos];
 
   let body = '';
   if (page.type === 'start') body = startHtml();
@@ -792,15 +977,15 @@ async function renderPage() {
       <button class="progress" id="toc" aria-label="목차 열기, 진행률 ${pct}%"><div class="progress-text">${i + 1} / ${total} · 목차 ☰</div><div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div></button>
       ${page.type === 'review' ? '<span class="nav-spacer"></span>' : '<button class="btn nav primary" id="next">다음 →</button>'}
     </div>
+    ${whereBarHtml(page)}
+  </header>
+  <main class="page">
     ${d.mode === 'supplement' ? `<div class="mode-banner">보완 중 · ${esc(d.serverId)} ${d.round}차 — 빈칸을 채우고, 저장된 값은 ✏️ 고치기로 고칩니다
       <button class="btn small" id="fresh">🔄 다른 기기 값 불러오기</button>
       <div class="sub">${d.freshAt ? `시트 값 확인: ${dateText(d.freshAt).slice(11)}` : ''}</div></div>` : ''}
-    ${page.spaceLabel ? `<div class="space-banner ${bannerClass(page.ctx)}">${esc(page.spaceLabel)}</div>` : ''}
-  </header>
-  <main class="page">
-    <h1 class="page-title">${esc(page.title)}</h1>
     ${copyFirstHtml(page)}
     ${body}
+    ${splitHtml(page)}
     <div class="bottom-nav">
       <button class="btn nav" id="prev2" ${i === 0 ? 'disabled' : ''}>← 이전</button>
       ${page.type === 'review' ? '' : '<button class="btn nav primary" id="next2">다음 →</button>'}
@@ -814,6 +999,7 @@ async function renderPage() {
   document.getElementById('toc').onclick = openToc;
   document.getElementById('fresh')?.addEventListener('click', () => pullFresh({ manual: true }));
   document.getElementById('copyFirst')?.addEventListener('click', () => copyFromFirst(page));
+  document.getElementById('splitStart')?.addEventListener('click', () => startSplit(page));
   bindPage(page);
 }
 
@@ -842,6 +1028,149 @@ async function copyFromFirst(page) {
   saveSoon();
   toast(`${res.changed.length}개 문항을 첫 칸과 같게 넣었습니다.`);
   keepScroll(renderPage);
+}
+
+// ---------- 나눠서 조사: 같은 조 다른 분과 한 화장실을 나눠 입력 ----------
+/** 장애인 화장실 개수 화면 아래: "나눠서 조사 시작" (아직 보내지 않은 새 조사에서만) */
+function splitHtml(page) {
+  if (!L.isSplitPage(page) || !L.canSplit(state.draft)) return '';
+  return `<div class="split-start">
+    <button class="btn" id="splitStart">👥 나눠서 조사 시작</button>
+    <div class="hint">같은 조 다른 분과 나눠서 입력할 때 누르세요</div>
+  </div>`;
+}
+
+/** 나눠서 조사 확인 창: 남자·여자 화장실 있음/없음도 함께 묻는다. → { hasMale, hasFemale } 또는 null(취소) */
+function splitDialog(d, orphanN) {
+  return new Promise((resolve) => {
+    const pick = { hasMale: d.hasMale, hasFemale: d.hasFemale };
+    const q = (key, label) => `<div class="item"><div class="q">${label}</div>
+      <div class="choices two">${[[true, '있음'], [false, '없음']].map(([v, t]) => `<button class="choice" data-sp="${key}" data-v="${v}">${t}</button>`).join('')}</div></div>`;
+    const wrap = document.createElement('div');
+    wrap.className = 'modal-wrap';
+    wrap.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="mt">
+      <h2 id="mt">나눠서 조사 시작</h2><div class="modal-body">
+      <p>지금까지 입력한 내용을 먼저 보냅니다. 같은 조(<b>${esc(d.surveyor)}</b>) 다른 분 휴대폰의 <b>'마저 해야 할 화장실'</b>에 이 화장실이 나타납니다. 맡은 쪽만 채우면 됩니다.</p>
+      ${q('hasMale', '남자화장실 있음?')}${q('hasFemale', '여자화장실 있음?')}
+      <div class="warn" id="splitWarn" hidden>남자화장실·여자화장실이 있는지 눌러 주세요.</div>
+      ${orphanN ? `<p>지금은 없는 칸에서 찍은 사진 ${orphanN}장은 올리지 않고 지웁니다.</p>` : ''}
+      <p class="hint">다른 분은 같은 조(${esc(d.surveyor)})를 골라 두어야 이 화장실이 보입니다.</p></div>
+      <div class="modal-buttons"><button class="btn" data-act="no">취소</button><button class="btn primary" data-act="yes">보내고 나눠서 하기</button></div></div>`;
+    const paint = () => wrap.querySelectorAll('[data-sp]').forEach((b) => {
+      const on = pick[b.dataset.sp] === (b.dataset.v === 'true');
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', String(on));
+    });
+    wrap.addEventListener('click', (e) => {
+      const c = e.target.closest('[data-sp]');
+      if (c) { pick[c.dataset.sp] = c.dataset.v === 'true'; wrap.querySelector('#splitWarn').hidden = true; paint(); return; }
+      const b = e.target.closest('[data-act]');
+      if (!b) return;
+      if (b.dataset.act === 'yes' && (pick.hasMale == null || pick.hasFemale == null)) { wrap.querySelector('#splitWarn').hidden = false; return; }
+      wrap.remove();
+      resolve(b.dataset.act === 'yes' ? pick : null);
+    });
+    paint();
+    document.body.appendChild(wrap);
+    wrap.querySelector('[data-act="yes"]').focus();
+  });
+}
+
+let splitting = false;
+/** 화면 전체를 덮는 '보내는 중' 안내 (누를 수 있는 것이 없음). 닫는 함수를 돌려준다 */
+function busyOverlay(text) {
+  const wrap = document.createElement('div');
+  wrap.className = 'modal-wrap busy';
+  wrap.innerHTML = `<div class="modal" role="alertdialog" aria-modal="true" aria-busy="true"><p class="big-text">${esc(text)}</p></div>`;
+  document.body.appendChild(wrap);
+  return () => wrap.remove();
+}
+
+/**
+ * 지금까지 입력한 조사를 바로(대기열 없이) 보내고, 이 휴대폰은 그 조사의 보완으로 이어서 입력한다.
+ * 같은 조 다른 휴대폰은 '마저 해야 할 화장실'에서 열어 맡은 쪽을 채운다. 인터넷이 없거나 실패하면 아무것도 바꾸지 않는다.
+ */
+async function startSplit(page) {
+  const d = state.draft;
+  if (splitting || !L.canSplit(d)) return;
+  splitting = true; // 두 번 눌러도 확인 창·보완 기록이 하나만 생기게
+  try {
+    await runSplit(d, page);
+  } finally {
+    splitting = false;
+  }
+}
+
+async function runSplit(d, page) {
+  const miss = L.splitMissingCounts(state.cfg, d);
+  if (miss.length) {
+    await modal('장애인 화장실 개수를 먼저 적어 주세요', `<p>나눠서 하려면 칸 구성을 먼저 정해야 합니다. 아래를 적은 뒤 다시 눌러 주세요.</p><ul>${miss.map((m) => `<li>${esc(m.question)}</li>`).join('')}</ul>`,
+      [{ label: '돌아가서 입력', value: true, primary: true }]);
+    focusItem(miss[0].ctx, miss[0].code);
+    return;
+  }
+  if (L.invalidAll(state.cfg, d).length) {
+    await modal('보낼 수 없습니다', '<p>"꼭 고쳐야 하는 숫자"가 있습니다. 확인과 제출 화면에서 먼저 고쳐 주세요. 길이는 cm 정수(소수점 없이)로 적습니다.</p>', [{ label: '확인', value: true, primary: true }]);
+    return;
+  }
+  const offlineMsg = () => modal('인터넷이 필요합니다', '<p>나눠서 하려면 지금 입력한 내용을 먼저 보내야 합니다. 인터넷이 연결된 곳에서 다시 눌러 주세요.</p><p>입력한 내용은 휴대폰에 그대로 있습니다.</p>', [{ label: '확인', value: true, primary: true }]);
+  if (!navigator.onLine) { await offlineMsg(); return; }
+  await saveNow();
+  // 보낼 값은 사본으로 만든다: 실패하면 조사 기록은 그대로 둔다
+  const sk = L.buildSubmission(state.cfg, structuredClone(d), nowText());
+  const orphanN = (await photos.byDraft(d.localId)).filter((p) => p.spaceKey && !sk.spaceKeys.includes(p.spaceKey)).length;
+  const pick = await splitDialog(d, orphanN);
+  if (!pick || state.draft !== d) return;
+  if (!navigator.onLine) { await offlineMsg(); return; }
+  const trial = Object.assign(structuredClone(d), pick);
+  const { payload, spaceKeys } = L.buildSubmission(state.cfg, trial, nowText());
+  delete payload.password;
+  // 보내는 동안은 화면을 덮어 입력·이동을 막는다 (보낸 값과 휴대폰의 값이 어긋나지 않게)
+  const closeBusy = busyOverlay('보내는 중… 잠시만 기다려 주세요');
+  let res;
+  let rows = null;
+  try {
+    try {
+      res = await call('submit', payload);
+    } catch (e) {
+      // 서버에는 저장됐는데 답만 못 받았을 수 있다 → 다시 누르면 같은 번호로 처음 것을 돌려받고,
+      // '제출하기'로 보내면 그 뒤 입력한 값은 보완으로 보낸다 (sync.js)
+      d.splitTried = true;
+      if (state.draft === d) await saveNow(); else { const cur = await drafts.get(d.localId); if (cur?.status === 'editing') { cur.splitTried = true; await drafts.put(cur); } }
+      closeBusy();
+      await modal('보내지 못했습니다', `<p>${esc(e.message)}</p><p>입력한 내용은 휴대폰에 그대로 있습니다. 인터넷이 잘 되는 곳에서 "나눠서 조사 시작"을 다시 눌러 주세요. 같은 조사가 두 번 저장되지는 않습니다.</p>`,
+        [{ label: '확인', value: true, primary: true }]);
+      return;
+    }
+    // 서버에 실제로 들어간 값을 읽어 와서 이어서 할 보완을 만든다 (같은 번호로 이미 있던 경우 처음 보낸 값만 들어가 있음)
+    try {
+      const prev = await call('getToilet', { id: res.id }, { timeoutMs: 15000 });
+      if (Number(prev.round) === Number(res.round)) rows = prev;
+    } catch { /* 아래에서 보낸 값으로 */ }
+  } finally {
+    closeBusy();
+  }
+  // 보낸 기록: 사진은 대기열이 이어서 올린다
+  for (const p of (await photos.byDraft(d.localId)).filter((x) => x.spaceKey && !spaceKeys.includes(x.spaceKey))) await photos.remove(p.photoId);
+  Object.assign(d, pick, { submission: payload, spaceKeys, status: 'photos', queuedAt: Date.now(), error: '', splitAt: Date.now() });
+  L.applySubmitResult(d, res);
+  await drafts.put(d);
+  // 이 휴대폰은 보완으로 이어서: 서버에 있는 칸은 '저장됨', 휴대폰에만 있는 답은 입력한 값으로, 나머지는 빈칸
+  const s = L.supplementAfterSplit(state.cfg, d, { rows, trustSubmission: !res.duplicate });
+  const pages = L.buildPages(state.cfg, s);
+  s.pageId = pages[Math.min(pages.length - 1, L.pageIndex(pages, page.id) + 1)].id;
+  await drafts.put(s);
+  processQueue();
+  // 그사이 다른 화면으로 갔으면 끌고 오지 않는다 (처음 화면 '마저 해야 할 화장실'에서 이어서 할 수 있음)
+  if (state.draft !== d || state.view !== 'survey') { toast('나눠서 조사를 시작했습니다. 처음 화면에서 이어서 할 수 있습니다.'); return; }
+  state.draft = s;
+  await renderPage();
+  window.scrollTo(0, 0);
+  toast('나눠서 조사를 시작했습니다. 이어서 입력하세요.');
+  if (s.splitDropped) {
+    await modal('처음 보낸 칸 구성으로 이어서 합니다', `<p>이 화장실은 처음 눌렀을 때의 장애인 화장실 칸 수로 이미 저장되어 있습니다. 그 뒤에 늘린 칸의 답 ${s.splitDropped}개는 넣을 곳이 없습니다.</p><p>칸 수를 바꿔야 하면 관리자에게 알려 주세요.</p>`,
+      [{ label: '확인', value: true, primary: true }]);
+  }
 }
 
 /** 목차: 모든 화면을 공간별로 묶어 보여 주고, 누르면 그 화면으로 바로 간다 */
@@ -904,7 +1233,7 @@ function presenceHtml() {
 
 function photoStrip(list) {
   if (!list.length) return '';
-  return `<div class="thumbs">${list.map((p) => `<span class="thumb"><img alt="사진" data-blob="${p.photoId}"><button class="thumb-del" data-delphoto="${p.photoId}" aria-label="사진 지우기">×</button></span>`).join('')}</div>`;
+  return `<div class="thumbs">${list.map((p) => `<span class="thumb"><img alt="${p.prior ? '나누기 전에 찍어 보낸 사진' : '사진'}" data-blob="${p.photoId}">${p.prior ? '' : `<button class="thumb-del" data-delphoto="${p.photoId}" aria-label="사진 지우기">×</button>`}</span>`).join('')}</div>`;
 }
 
 function itemHtml(it, ctx, draftPhotos, sug) {
@@ -927,7 +1256,7 @@ function itemHtml(it, ctx, draftPhotos, sug) {
   } else if (it.type === L.MULTI) {
     const opts = state.cfg.choices[it.list] || [];
     const sel = L.splitMulti(raw);
-    input = `<div class="hint">여러 개 고를 수 있습니다.</div><div class="choices multi ${locked ? 'locked' : ''}">${opts.map((o) => `<button class="choice ${sel.includes(o.value) ? 'on' : ''}" data-multi="${esc(o.value)}" aria-pressed="${sel.includes(o.value)}" ${locked ? 'disabled' : ''}>${esc(o.label)}</button>`).join('')}</div>`;
+    input = `<div class="hint">여러 개 고를 수 있습니다.</div><div class="choices multi ${L.isCompactChoices(it, opts) ? 'compact' : ''} ${locked ? 'locked' : ''}">${opts.map((o) => `<button class="choice ${sel.includes(o.value) ? 'on' : ''}" data-multi="${esc(o.value)}" aria-pressed="${sel.includes(o.value)}" ${locked ? 'disabled' : ''}>${esc(o.label)}</button>`).join('')}</div>`;
     if (!opts.length) input = `<div class="alert">선택지 목록 "${esc(it.list)}"이(가) 선택지 탭에 없습니다.</div>`;
   } else if (it.type === '선택(하나)') {
     const opts = state.cfg.choices[it.list] || [];
@@ -987,7 +1316,7 @@ function reviewHtml(draftPhotos) {
     ${warns.length ? `<div class="card warnbox"><h2>확인이 필요한 답 ${warns.length}개</h2>
       ${warns.map(({ w, p }) => `<button class="btn list-btn" data-goto="${esc(p.id)}">${p.spaceLabel ? `[${esc(p.spaceLabel)}] ` : ''}${esc(w)}</button>`).join('')}</div>` : ''}
     ${d.mode === 'supplement'
-    ? `<div class="card"><p class="big-text">${(() => { const b = L.buildSupplementPayload(state.cfg, d, ''); return `새로 채운 칸 <b>${b.filledCount}개</b> · 고친 칸 <b>${b.editCount}개</b>`; })()} · 새 사진 ${draftPhotos.length}장</p></div>
+    ? `<div class="card"><p class="big-text">${(() => { const b = L.buildSupplementPayload(state.cfg, d, ''); return `새로 채운 칸 <b>${b.filledCount}개</b> · 고친 칸 <b>${b.editCount}개</b>`; })()} · 새 사진 ${draftPhotos.filter((p) => !p.prior).length}장</p></div>
       <button class="btn primary big" id="submit">보완 제출</button>
       <p class="hint">빈칸은 채우고, ✏️ 고치기로 고친 칸은 새 값으로 바꿉니다. 그사이 다른 기기가 같은 칸을 먼저 고쳤으면 그 칸은 바꾸지 않고 알려 드립니다.</p>`
     : `<button class="btn primary big" id="submit">제출하기</button>
@@ -1028,10 +1357,8 @@ function bindPage(page) {
     el.querySelectorAll('[data-multi]').forEach((b) => {
       b.onclick = () => {
         const v = b.dataset.multi;
-        const cur = L.splitMulti(L.getRaw(d, ctx, code));
-        let next = cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v];
-        // '없음'은 다른 보기와 함께 고를 수 없다: 없음을 누르면 나머지를 끄고, 다른 보기를 누르면 없음을 끈다
-        if (!cur.includes(v)) next = v === 'NONE' ? ['NONE'] : next.filter((x) => x !== 'NONE');
+        // '없음'·'둘 다 없음'·'알 수 없음'은 다른 보기와 함께 고를 수 없다: 누르면 나머지를 끄고, 다른 보기를 누르면 그것을 끈다
+        const next = L.toggleMulti(L.splitMulti(L.getRaw(d, ctx, code)), v);
         L.setRaw(d, ctx, code, L.joinMulti(state.cfg, it, next));
         markTouched(ctx, code); saveSoon(); keepScroll(renderPage);
       };
@@ -1158,7 +1485,7 @@ async function submitSupplement(d) {
 // ---------- 시작 ----------
 async function main() {
   requestPersistence();
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').then((r) => r.update()).catch(() => {});
+  watchAppUpdate();
   // 다 보내고 나면 배정·빈칸 수를 새로 받아 '마저 해야 할 화장실'을 맞춘다
   let refreshTimer = null;
   onSyncChange(() => {
@@ -1166,7 +1493,7 @@ async function main() {
     clearTimeout(refreshTimer);
     refreshTimer = setTimeout(async () => {
       const pending = (await drafts.all()).some((d) => ['queued', 'sending', 'photos'].includes(d.status));
-      if (!pending && navigator.onLine) loadAssignments();
+      if (!pending && navigator.onLine) refreshToilets();
     }, 3000);
   });
   window.addEventListener('online', () => { if (state.view === 'home') { loadConfig().then(renderHome); } });
@@ -1185,7 +1512,7 @@ main().catch((e) => {
     <pre class="diag">${esc(String(e?.stack || '').split(/\r?\n/).slice(0, 8).join(' | '))}</pre>`;
   document.getElementById('retry').onclick = () => location.reload();
   document.getElementById('softreset').onclick = async () => {
-    ls.set('ts.lastTeam', '');
+    ss.set('ts.team', '');
     try { await kv.set('assignments', null); await kv.set('config', null); } catch { /* 무시 */ }
     location.reload();
   };

@@ -1,5 +1,5 @@
 // 조사 로직 (화면·저장과 무관한 순수 함수). 브라우저와 Node 테스트에서 함께 쓴다.
-import { parseSkip, shouldSkip, ruleList } from './skip.js';
+import { parseSkip, shouldSkip, ruleList, isSharedRule } from './skip.js';
 
 // 요청서에 이름이 나온 항목코드만 여기 둔다. 기준 숫자는 모두 항목정의에서 읽는다.
 export const MULTI_COUNT_CODES = { C1a: 'MALE', C1b: 'FEMALE', C1c: 'SHARED' };
@@ -116,7 +116,23 @@ export function isSkipped(cfg, draft, ctx, code, depth = 0) {
   return ruleList(item.rule).some((r) => ruleSkips(cfg, draft, ctx, r, depth));
 }
 
+/** 이 칸이 남녀 공용 장애인 화장실 칸인가 (v6 '공용 장애인 화장실이면/아니면' 조건) */
+function isSharedSpace(draft, ctx) {
+  const info = spaceInfo(draft, ctx);
+  return info?.kind === 'MULTI' && info.side === 'SHARED';
+}
+// sharedEq·sharedFill 은 공용 칸이면 묻지 않음, sharedNeq 는 공용 칸이 아니면 묻지 않음
+const sharedSkips = (draft, ctx, rule) => (rule.op === 'sharedNeq' ? !isSharedSpace(draft, ctx) : isSharedSpace(draft, ctx));
+
+/** '공용 장애인 화장실이면 …로 채움': 공용 칸이면 묻지 않고 저장할 값. 아니면 undefined */
+export function autoFillValue(cfg, draft, ctx, code) {
+  const rule = ruleList(cfg.byCode[code]?.rule).find((r) => r.op === 'sharedFill');
+  return rule && isSharedSpace(draft, ctx) ? rule.value : undefined;
+}
+
 function ruleSkips(cfg, draft, ctx, rule, depth) {
+  // '공용 장애인 화장실이면/아니면': 앞 답이 아니라 칸의 쪽으로 정해짐
+  if (isSharedRule(rule)) return sharedSkips(draft, ctx, rule);
   const refItem = cfg.byCode[rule.ref];
   if (!refItem) return false;
   // '이 쪽 장애인 화장실 …': 남자·여자화장실 화면에서만. 같은 쪽(공용 포함) 장애인 칸 중 그 답인 칸이 없으면 건너뜀
@@ -138,12 +154,58 @@ function ruleSkips(cfg, draft, ctx, rule, depth) {
   return shouldSkip(rule, refValue);
 }
 
-/** 시트에 저장될 값 */
+/** 시트에 저장될 값. 지금 보기에 없는 선택 답(예: 문항이 바뀌기 전에 고른 값)은 보내지 않는다 — 저장된(잠긴) 시트 값은 그대로 */
 export function finalValue(cfg, draft, ctx, code, depth = 0) {
   const item = cfg.byCode[code];
   if (forcedNA(cfg, draft, ctx, code)) return 'NA';
+  const raw = getRaw(draft, ctx, code);
+  const fill = autoFillValue(cfg, draft, ctx, code);
+  if (fill !== undefined) {
+    // 묻지 않고 정해진 값으로 저장 (NA 아님). 보완에서 시트에 이미 진짜 답이 있으면 그 값을 그대로 둔다(빈칸·NA일 때만 채움)
+    if (isLocked(draft, ctx, code) && !blank(raw) && raw !== 'NA') return normalize(item, raw);
+    return fill;
+  }
   if (isSkipped(cfg, draft, ctx, code, depth)) return 'NA';
-  return normalize(item, getRaw(draft, ctx, code));
+  return normalize(item, isLocked(draft, ctx, code) ? raw : fitChoiceValue(cfg, item, raw));
+}
+
+/**
+ * 선택 문항의 답을 지금 보기 목록에 맞춘다: 하나 고르기는 목록에 없으면 빈칸, 여러 개는 목록에 없는 것만 뺀다.
+ * '해당 없음'(NA)은 그대로. 선택 문항이 아니거나 보기 목록을 못 찾으면(설정 문제) 그대로 둔다.
+ */
+export function fitChoiceValue(cfg, item, raw) {
+  if (blank(raw) || !item || (item.type !== '선택(하나)' && item.type !== MULTI)) return raw;
+  if (String(raw) === 'NA') return raw;
+  const list = cfg.choices?.[item.list];
+  if (!list?.length) return raw;
+  const values = new Set(list.map((c) => c.value));
+  if (item.type === '선택(하나)') return values.has(String(raw)) ? raw : '';
+  const kept = splitMulti(raw).filter((x) => values.has(x));
+  return kept.length === splitMulti(raw).length ? raw : kept.join(',');
+}
+
+/** 답이 있는가 (보기에 없는 선택 답은 답이 없는 것으로 봄) */
+const answeredRaw = (cfg, draft, ctx, code) => !blank(fitChoiceValue(cfg, cfg.byCode[code], getRaw(draft, ctx, code)));
+
+/**
+ * 조사 항목이 바뀐 뒤: 입력 중인 조사에서 지금 보기에 없는 선택 답을 지운다(여러 개는 그 보기만).
+ * 보완의 저장된(잠긴) 시트 값은 건드리지 않는다. 바꾼 칸 수를 돌려준다.
+ */
+export function cleanDraftChoices(cfg, draft) {
+  let n = 0;
+  const clean = (ctx, values) => {
+    for (const [code, v] of Object.entries(values || {})) {
+      const it = cfg.byCode[code];
+      if (!it || isLocked(draft, ctx, code)) continue;
+      const fit = fitChoiceValue(cfg, it, v);
+      if (fit === v) continue;
+      values[code] = fit;
+      n++;
+    }
+  };
+  clean(TOILET, draft.toilet);
+  for (const [key, sp] of Object.entries(draft.spaces || {})) clean(key, sp.values);
+  return n;
 }
 
 export function normalize(item, raw) {
@@ -249,7 +311,7 @@ export function missingOnPage(cfg, draft, page) {
   }
   if (page.type !== 'items') return [];
   return page.codes
-    .filter((code) => cfg.byCode[code].required && !isLocked(draft, page.ctx, code) && isVisible(cfg, draft, page.ctx, code) && blank(getRaw(draft, page.ctx, code)))
+    .filter((code) => cfg.byCode[code].required && !isLocked(draft, page.ctx, code) && isVisible(cfg, draft, page.ctx, code) && !answeredRaw(cfg, draft, page.ctx, code))
     .map((code) => ({ ctx: page.ctx, code, question: cfg.byCode[code].question }));
 }
 
@@ -258,9 +320,27 @@ export function missingAll(cfg, draft) {
 }
 
 export const MULTI = '선택(여러 개)';
-// 이 저장값은 '단독 보기' — 다른 보기와 함께 고르면 확인이 필요하다
+// 이 저장값은 '단독 보기'(없음·둘 다 없음·알 수 없음·해당 없음) — 다른 보기와 함께 고를 수 없다
 const SOLO_VALUES = new Set(['NONE', 'UNKNOWN', 'NA']);
+export const isSoloValue = (v) => SOLO_VALUES.has(v);
 export const splitMulti = (raw) => (blank(raw) ? [] : String(raw).split(',').map((x) => x.trim()).filter(Boolean));
+
+/**
+ * 여러 개 고르기에서 보기 하나를 눌렀을 때의 새 답 목록.
+ * 단독 보기를 켜면 나머지를 끄고, 다른 보기를 켜면 단독 보기를 끈다. 이미 켜진 보기를 누르면 그것만 끈다.
+ */
+export function toggleMulti(cur, v) {
+  if (cur.includes(v)) return cur.filter((x) => x !== v);
+  return isSoloValue(v) ? [v] : [...cur.filter((x) => !isSoloValue(x)), v];
+}
+
+// 보기 글이 이만큼(띄어쓰기 뺀 글자 수) 이하로 모두 짧으면 2열 작은 버튼 (예: 요일 월~일·알 수 없음).
+// 좁은 휴대폰(320px)에서도 '✓ 알 수 없음'이 한 줄에 들어가는 길이. 더 길면(예: 남자 화장실) 한 줄에 하나
+const COMPACT_LABEL_MAX = 4;
+/** 여러 개 고르기 중 보기가 3개 이상이고 보기 글이 모두 짧은 질문인가 → 2열 작은 버튼 */
+export function isCompactChoices(item, opts) {
+  return item.type === MULTI && opts.length >= 3 && opts.every((o) => [...String(o.label ?? '').replace(/\s/g, '')].length <= COMPACT_LABEL_MAX);
+}
 
 /** 여러 개 답을 고른 순서와 상관없이 선택지 순서대로 이어 붙인다 */
 export function joinMulti(cfg, item, values) {
@@ -386,8 +466,13 @@ export function suggestH(cfg, draft) {
     else out.H2 = { value: null, reason: 'C3·C4 값이 비어 있어 제안하지 못했습니다.' };
   }
   for (const [target, src] of [['H3a', 'B2a'], ['H3b', 'B3'], ['H3c', 'B4a']]) {
-    if (!cfg.byCode[target]) continue;
-    const v = fv(TOILET, src);
+    if (!cfg.byCode[target] || !cfg.byCode[src]) continue;
+    let v = fv(TOILET, src);
+    // v6: 점자 표지(B2a)는 여러 개 고르기(남자 화장실·여자 화장실·둘 다 없음) — 하나라도 있으면 '있음', '둘 다 없음'이면 '없음'
+    if (target === 'H3a' && cfg.byCode.B2a.type === MULTI) {
+      const vals = splitMulti(v);
+      v = vals.some((x) => x === 'MALE' || x === 'FEMALE' || x === 'Y') ? 'Y' : vals.some((x) => x === 'NONE' || x === 'N') ? 'N' : '';
+    }
     const allowed = (cfg.choices[cfg.byCode[target].list] || []).some((c) => c.value === v);
     out[target] = blank(v) || !allowed
       ? { value: null, reason: `${src} 답이 없어 제안하지 못했습니다.` }
@@ -501,9 +586,13 @@ export function prefillFromPrevious(cfg, draft, prev) {
   // 건너뛰기·없는 화장실 때문에 자동으로 들어간 NA는 옮기지 않는다 (이번에 조건이 바뀌면 새로 답해야 하므로).
   // 이번에도 건너뛰어지면 제출할 때 다시 NA가 된다.
   const autoNA = (it, v) => String(v) === 'NA' && (it.rule || SIDE_ONLY_TOILET_ITEMS[it.code]);
+  // 보기가 바뀐 선택 문항(예: v6 점자 표지 있음/없음 → 남자·여자 화장실)은 지금 보기에 없는 예전 답을 옮기지 않는다
+  // ('해당 없음'으로 직접 고른 NA는 옮김 — 건너뛰기로 생긴 NA는 위 autoNA 에서 이미 뺌)
   readRows(cfg, draft, prev, (ctx, it, v) => {
     if (blank(v) || autoNA(it, v) || it.type === PHOTO) return; // 사진 장수는 옮기지 않음(사진은 새로 찍음)
     if ((ctx === MA && draft.hasMale === false) || (ctx === FE && draft.hasFemale === false)) return;
+    v = fitChoiceValue(cfg, it, String(v));
+    if (blank(v)) return;
     setRaw(draft, ctx, it.code, String(v));
     draft.prefilled[`${ctx}:${it.code}`] = true;
   });
@@ -558,6 +647,7 @@ export function supplementFromRows(cfg, draft, prev) {
  * 'skip' = 앞 답이 있고 그 답 때문에 건너뜀 · 'blank' = 앞 답이 비어(또는 자동 NA) 건너뜀 · 'show' = 건너뛰지 않음
  */
 function origRuleState(cfg, draft, ctx, rule) {
+  if (isSharedRule(rule)) return sharedSkips(draft, ctx, rule) ? 'skip' : 'show'; // 칸의 쪽은 답이 아니라 늘 알고 있음
   const refItem = cfg.byCode[rule.ref];
   if (!refItem) return 'show';
   const unknown = (k) => (draft.orig[k] ?? '') === '' || !!draft.replaceable[k];
@@ -734,6 +824,8 @@ export function buildSupplementPayload(cfg, draft, nowText) {
     const v = finalValue(cfg, draft, ctx, it.code);
     const to = blank(v) ? '' : v; // 숫자는 숫자로 (시트에 글자로 들어가지 않도록)
     if (String(to) === String(normalize(it, from) ?? '') || String(to) === from) return undefined;
+    // 묻지 않고 정해진 값(공용 칸 위치 등)이 시트와 다르면(예: 예전 NA) 그 값으로 맞춘다
+    if (autoFillValue(cfg, draft, ctx, it.code) !== undefined && (from === '' || from === 'NA')) return { from, to, auto: true };
     // 직접 고친 칸이 아니면, 앞 질문이 이번에 바뀌어 건너뛰기가 달라진 경우에만 보낸다
     // (시트에 원래 어긋난 값이 있어도 보완할 때마다 몰래 NA로 바꾸지 않도록)
     if (!special && !draft.unlocked?.[key] && !parentChanged(ctx, it)) return undefined;
@@ -812,7 +904,7 @@ export function pageStats(cfg, draft, page) {
   }
   if (page.type !== 'items') return null;
   const visible = page.codes.filter((code) => isVisible(cfg, draft, page.ctx, code));
-  const answered = visible.filter((code) => !blank(getRaw(draft, page.ctx, code))).length;
+  const answered = visible.filter((code) => (isLocked(draft, page.ctx, code) ? !blank(getRaw(draft, page.ctx, code)) : answeredRaw(cfg, draft, page.ctx, code))).length;
   return { total: visible.length, answered, missingRequired: missingOnPage(cfg, draft, page).length };
 }
 
@@ -905,7 +997,8 @@ export function groupSummary(g) {
   const supp = ds.find((d) => d.status === 'editing' && d.mode === 'supplement');
   const sending = ds.find((d) => ['queued', 'sending', 'photos'].includes(d.status));
   const sent = ds.find((d) => d.mode !== 'supplement' && d.serverId && d.status === 'done');
-  const lastSupp = ds.find((d) => d.mode === 'supplement' && d.status === 'done' && d.result);
+  // 보완 결과 (나눠서 조사 뒤 '나머지 값'을 보낸 처음 조사 기록도 포함)
+  const lastSupp = ds.find((d) => (d.mode === 'supplement' || d.restSent) && d.status === 'done' && d.result);
   const kind = failed ? 'failed' : editing ? 'editing' : supp ? 'supp' : sending ? 'sending' : 'done';
   const named = ds.find((d) => d.toilet?.B0a);
   return { kind, failed, editing, supp, sending, sent, lastSupp, name: named?.toilet.B0a || '(이름 없음)', tid: g.tid || sent?.serverId || '' };
@@ -929,8 +1022,182 @@ export function assignmentStatus(a, localDrafts, { serverAt = 0 } = {}) {
   return { kind: 'todo' };
 }
 
+// ---------- 다 보낸 조사 정리 (휴대폰 저장 공간) ----------
+// 서버가 받았다고 확인한 조사(제출·사진·나머지 값까지 모두)는 휴대폰에서 입력 내용·사진을 지우고
+// 첫 화면 카드에 필요한 작은 '보냄 기록'만 남긴다(화장실 이름·번호·배정번호·보완 결과 알림). 보냄 기록도 며칠 뒤 지운다.
+export const RECEIPT_KEEP_MS = 7 * 24 * 3600 * 1000;
+const RECEIPT_KEYS = ['localId', 'createdAt', 'updatedAt', 'status', 'mode', 'serverId', 'round', 'resurveyOf', 'assignId', 'assignTeam', 'assignDate',
+  'surveyor', 'result', 'warnings', 'sentAt', 'savedAt', 'queuedAt', 'splitAt', 'restSent'];
+
+/**
+ * 이 조사 기록을 지워도(보냄 기록으로 줄여도) 되는가: 서버가 모두 받았을 때만.
+ * - 상태가 '전송 완료'(제출 확인 + 사진 모두 올림)이고, 나머지 값(restPending)이 남지 않았고
+ * - 사진이 모두 올라갔거나(done) 휴대폰에서 이미 없어진 것(lost)뿐이고
+ * - 이 기록을 이어서 입력 중인 '나눠서 조사' 보완이 끝나지 않았을 때(그 화면에 보낸 사진을 보여 줌)는 기다림
+ */
+export function canCompact(d, allDrafts, draftPhotos) {
+  if (!d || d.compact || d.status !== 'done' || d.restPending) return false;
+  if (allDrafts.some((x) => x.splitFrom === d.localId && x.status !== 'done')) return false;
+  return draftPhotos.every((p) => p.status === 'done' || p.status === 'lost');
+}
+
+/** 보냄 기록: 첫 화면 카드(제출됨·보완 결과 알림)에 필요한 것만 */
+export function receiptOf(d) {
+  const r = { compact: true, toilet: d.toilet?.B0a ? { B0a: d.toilet.B0a } : {}, spaces: {} };
+  for (const k of RECEIPT_KEYS) if (d[k] !== undefined) r[k] = d[k];
+  return r;
+}
+
+/** 보냄 기록을 지울 때가 됐는가 */
+export const receiptExpired = (d, now = Date.now()) => !!d.compact && now - (d.sentAt || d.updatedAt || 0) > RECEIPT_KEEP_MS;
+
 /** 진행률: 필수 항목 중 답한 비율 대신 화면 위치 기준 */
 export function pageIndex(pages, pageId) {
   const i = pages.findIndex((p) => p.id === pageId);
   return i < 0 ? 0 : i;
+}
+
+// ---------- 나눠서 조사 (같은 조 두 사람이 한 화장실을 나눠 입력) ----------
+/** 장애인 화장실 개수(C1a·C1b·C1c)를 묻는 화장실 화면인가 — '나눠서 조사 시작' 버튼을 여기에 둔다 */
+export function isSplitPage(page) {
+  return page?.type === 'items' && page.ctx === TOILET && page.codes.some((c) => c in MULTI_COUNT_CODES);
+}
+
+/** 나눠서 조사를 시작할 수 있는 조사인가: 아직 보내지 않은 새 조사(다시 조사 포함)만 */
+export function canSplit(draft) {
+  return !!draft && draft.mode !== 'supplement' && draft.status === 'editing' && !draft.serverId;
+}
+
+/** 나누기 전에 꼭 적어야 하는 장애인 화장실 개수 중 빈 것 (칸 구성은 보낸 뒤 바꿀 수 없으므로) */
+export function splitMissingCounts(cfg, draft) {
+  return Object.keys(MULTI_COUNT_CODES)
+    .filter((code) => cfg.byCode[code] && blank(draft.toilet[code]))
+    .map((code) => ({ ctx: TOILET, code, question: cfg.byCode[code].question }));
+}
+
+/**
+ * 서버의 submit 결과를 조사 기록에 적는다 (대기열 전송과 '나눠서 조사'가 함께 씀).
+ * 같은 clientId로 이미 저장돼 있던 결과(duplicate)면 그때의 칸 구성과 지금 칸 구성이 다를 수 있어
+ * 순서 대신 공간 종류(-M순번·-MA·-FE)로 공간번호를 맞춘다.
+ */
+export function applySubmitResult(draft, res, now = Date.now()) {
+  draft.serverId = res.id;
+  draft.savedAt = now; // 서버에 줄이 생긴 시각 (활동 목록과 비교용)
+  draft.round = res.round;
+  const ids = res.spaceIds || [];
+  if (!res.duplicate) {
+    draft.spaceIds = Object.fromEntries(draft.spaceKeys.map((k, i) => [k, ids[i]]));
+  } else {
+    let m = 0;
+    draft.spaceIds = {};
+    (draft.submission?.spaces || []).forEach((sp, i) => {
+      const id = sp.kind === 'MULTI' ? `${res.id}-M${++m}` : sp.kind === 'MALE' ? `${res.id}-MA` : `${res.id}-FE`;
+      if (ids.includes(id)) draft.spaceIds[draft.spaceKeys[i]] = id;
+    });
+  }
+  draft.warnings = res.warnings || [];
+  return draft;
+}
+
+/**
+ * '나눠서 조사'로 먼저 보낸 뒤: 그 조사를 이어서 입력할 보완 기록을 만든다.
+ * 보낸 칸은 '저장됨'으로 잠기고, 빈칸은 그대로 채울 수 있다. 보낸 기록(sent)은 사진을 올리러 대기열로 간다.
+ */
+export function supplementAfterSplit(cfg, sent, { rows = null, trustSubmission = true, current = sent, now = Date.now() } = {}) {
+  // 기준 행: 서버에서 읽은 실제 행(rows)이 가장 정확하다. 못 읽었으면 보낸 값 —
+  // 단, 같은 번호로 이미 저장돼 있던 경우(duplicate)는 서버 값이 보낸 값과 다를 수 있어 값은 비우고 칸 구성만 쓴다(모두 '빈칸'으로 열림)
+  let base = rows;
+  if (!base) {
+    base = rowsFromSubmitted(sent);
+    if (!trustSubmission) {
+      const keepOnly = (o, keep) => Object.fromEntries(Object.entries(o || {}).map(([k, v]) => [k, keep(k) ? v : '']));
+      const structVars = new Set(STRUCTURE_CODES.map((c) => cfg.byCode[c]?.var).filter(Boolean));
+      const meta = new Set(['공간번호', '공간종류', '장애인화장실구분', '순번']);
+      base = { ...base, toilet: keepOnly(base.toilet, (k) => structVars.has(k)), spaces: base.spaces.map((sp) => keepOnly(sp, (k) => meta.has(k))) };
+    }
+  }
+  const d = supplementFromRows(cfg, newDraft({ surveyor: sent.surveyor }), base);
+  if (!rows && !trustSubmission) { d.hasMale = current.hasMale; d.hasFemale = current.hasFemale; }
+  d.splitFrom = sent.localId;
+  d.freshAt = now; // 방금 보낸 값이므로 바로 다시 불러오지 않음
+  // 이 휴대폰에서 적었지만 서버에 아직 없는 답은 빈칸이 아니라 '입력한 값'(잠기지 않음)으로 옮긴다 → 보완 제출 때 보냄
+  let carried = 0;
+  let dropped = 0;
+  const carry = (ctx, values) => {
+    for (const [code, v] of Object.entries(values || {})) {
+      if (blank(v) || !cfg.byCode[code]) continue;
+      if (ctx !== TOILET && !d.spaceIds[ctx]) { dropped++; continue; } // 서버에 없는 칸
+      const key = `${ctx}:${code}`;
+      if (d.locked[key] || !blank(getRaw(d, ctx, code))) continue; // 서버에 이미 값이 있음
+      setRaw(d, ctx, code, v);
+      d.touched[key] = true;
+      carried++;
+    }
+  };
+  carry(TOILET, current.toilet);
+  for (const [key, sp] of Object.entries(current.spaces || {})) carry(key, sp.values);
+  return Object.assign(d, { splitCarried: carried, splitDropped: dropped });
+}
+
+/**
+ * 나눠서 조사를 누른 뒤 응답을 못 받았는데(서버에는 저장됨) 나중에 '제출하기'로 다시 보낸 경우:
+ * 서버는 같은 clientId라 처음 것만 돌려준다. 그 뒤에 입력한 값은 보완(빈칸 채우기)으로 보낸다. 보낼 것이 없으면 null
+ */
+export function restAfterDuplicate(cfg, draft, nowText, prev = null) {
+  const sub = draft.submission;
+  if (!sub || !draft.serverId) return null;
+  // 서버에 이미 같은 값이 있는 칸은 보내지 않는다 (2.50 과 2.5 처럼 모양만 다른 값도 같은 값)
+  const same = Number(prev?.round) === Number(draft.round) && prev?.id === draft.serverId;
+  const serverSpace = (spaceId) => (same ? (prev.spaces || []).find((r) => String(r['공간번호']) === spaceId) || {} : {});
+  const keep = (vars, applies, server) => Object.fromEntries(Object.entries(vars || {})
+    .filter(([v, val]) => {
+      const it = cfg.byVar[v];
+      if (blank(val) || !it || !applies(it)) return false;
+      const cur = server[v];
+      return blank(cur) || String(normalize(it, cur)) !== String(normalize(it, val));
+    }));
+  const toilet = keep(sub.toilet, (it) => it.tab === '화장실', same ? prev.toilet || {} : {});
+  const spaces = [];
+  (sub.spaces || []).forEach((sp, i) => {
+    const spaceId = draft.spaceIds[draft.spaceKeys[i]];
+    if (!spaceId) return;
+    const values = keep(sp.values, (it) => it.tab === '공간' && appliesTo(it, sp.kind), serverSpace(spaceId));
+    if (Object.keys(values).length) spaces.push({ spaceId, values, edits: {}, replaceNA: [] });
+  });
+  if (!Object.keys(toilet).length && !spaces.length) return null;
+  return {
+    action: 'supplement', clientId: `${draft.localId}-rest`, id: draft.serverId, round: draft.round,
+    meta: { 입력시각: nowText, 조사자: draft.surveyor }, toilet, edits: {}, replaceNA: [], spaces,
+  };
+}
+
+/**
+ * 첫 화면 '마저 해야 할 화장실'용: 같은 조가 (다른 휴대폰으로) 보낸 화장실 중 빈칸이 남은 곳.
+ * listToilets 결과에서 조사자가 그 조이고, 최근 days일 안에 입력된 곳. skip(이미 다른 카드로 보이는 번호)은 뺀다.
+ */
+export function teamBlankToilets(toilets, { surveyor, today, days = 7, skip = new Set() }) {
+  if (!surveyor) return [];
+  const since = shiftDays(today, -(days - 1));
+  return (toilets || []).filter((t) => {
+    if (t.surveyor !== surveyor || !(t.missing > 0) || skip.has(t.id)) return false;
+    const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(t.time || ''));
+    return !m || m[1] >= since; // 날짜를 못 읽으면 보여 준다
+  }).sort((a, b) => String(b.time).localeCompare(String(a.time)));
+}
+
+/**
+ * 첫 화면을 가볍게 새로 받을 때(listToilets만): 배정의 '제출됨'(done) 정보를 화장실 목록으로 맞춘다.
+ * 배정번호가 있는 화장실의 최신 차수를 done에 넣고(없으면 추가), 빈칸 수를 새 값으로. assignments를 고쳐서 돌려준다.
+ */
+export function mergeToiletInfo(assignments, toilets) {
+  const byId = new Map((assignments || []).map((a) => [a.id, a]));
+  for (const t of toilets || []) {
+    const a = t.assignId && byId.get(t.assignId);
+    if (!a) continue;
+    a.done = a.done || [];
+    const ex = a.done.find((x) => x.tid === t.id && Number(x.round) === Number(t.round));
+    if (ex) ex.missing = t.missing ?? ex.missing ?? null;
+    else a.done.push({ tid: t.id, round: t.round, missing: t.missing ?? null });
+  }
+  return assignments;
 }

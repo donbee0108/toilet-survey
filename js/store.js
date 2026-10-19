@@ -48,6 +48,8 @@ export const drafts = {
   get: (id) => tx('drafts', 'readonly', (s) => req2p(s.get(id))),
   all: () => tx('drafts', 'readonly', (s) => req2p(s.getAll())),
   put: (d) => tx('drafts', 'readwrite', (s) => { d.updatedAt = Date.now(); s.put(structuredClone(d)); }),
+  /** 고친 시각(updatedAt)을 바꾸지 않고 저장 — 다 보낸 기록을 작은 '보냄 기록'으로 줄일 때 (첫 화면 순서 유지) */
+  putAsIs: (d) => tx('drafts', 'readwrite', (s) => { s.put(structuredClone(d)); }),
   remove: (id) => tx('drafts', 'readwrite', (s) => s.delete(id)),
 };
 

@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"cd \\\"/g/공유 드라이브/22_스마트워크/손단비/toilet_survey\\\" 2>/dev/null || cd \\\"G:/공유 드라이브/22_스마트워크/손단비/toilet_survey\\\"; ls; ls docs tests/fixtures frontend/js; wc -c tests/fixtures/config_v5.json fronte...",
+  "error": "Exit code 1\nREADME.md\nbackend/\ndocs/\nfrontend/\ntests/\ntools/\ndocs:\nAPI.md\nv3_변경명세.md\nv4_변경명세.md\nv5_변경명세.md\n디자인_미리보기/\n문항검토안_기술용.md\n문항정리표.md\n문항최종확인표.md\n문항최종확인표_v3_표시본.md\n문항최종확인표_v4_표시본.md\n배정_명세.md\n배포안내서.md\n조사원_안내/\n테스트안내.md\n\nfrontend/js:\napi.js\napp.js\nlogic.js\nphoto.js\nskip.js\nstore.js\nsync.js\n\ntests/fixtures:\nconfig.json\nconfig_v3.json\nconfig_v4.json\nconfig_v5.json\npages_v4.json\n  76583 tests/fixtures/config_v5.json\n   5402 frontend/js/skip.js\n  48961 frontend/js/logic.js\n  13899 docs/API.md\n  147...",
+  "timestamp": "2026-10-14T08:34:36.431Z",
+  "retry_count": 1
+}
