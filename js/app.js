@@ -109,7 +109,7 @@ function modal(title, bodyHtml, buttons) {
     wrap.className = 'modal-wrap';
     wrap.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="mt">
       <h2 id="mt">${esc(title)}</h2><div class="modal-body">${bodyHtml}</div>
-      <div class="modal-buttons">${buttons.map((b, i) => `<button class="btn ${b.primary ? 'primary' : ''}" data-i="${i}">${esc(b.label)}</button>`).join('')}</div></div>`;
+      <div class="modal-buttons${buttons.length > 3 ? ' stack' : ''}">${buttons.map((b, i) => `<button class="btn ${b.primary ? 'primary' : ''}" data-i="${i}">${esc(b.label)}</button>`).join('')}</div></div>`;
     wrap.addEventListener('click', (e) => {
       const b = e.target.closest('button[data-i]');
       if (!b) return;
@@ -389,7 +389,7 @@ function otherCardHtml(g) {
     lines.push(`보완 입력 중 · ${dateText(m.supp.updatedAt)} 저장 — 끝나면 "보완 제출"을 눌러 주세요`);
     actions = `<button class="btn primary" data-open="${m.supp.localId}">보완 이어서</button><button class="btn danger small" data-del="${m.supp.localId}">삭제</button>`;
   } else if (m.kind === 'done' && m.sent?.serverId) {
-    actions = `<button class="btn" data-supp="${m.sent.localId}">보완하기</button>`;
+    actions = `<button class="btn" data-supp="${m.sent.localId}">보완하기</button><button class="btn" data-view="${esc(m.sent.serverId)}">📄 제출한 내용 보기</button>`;
   }
   return `<div class="card other">
     <div class="row"><b class="grow">${esc(m.name)}</b><span class="status ${chipCls}">${chipText}</span></div>
@@ -472,9 +472,11 @@ const openAssignment = navTask(async (id) => {
   if (st.kind === 'done') {
     const supp = (await drafts.all()).find((d) => d.mode === 'supplement' && d.status === 'editing' && d.serverId === st.tid);
     if (supp) return openDraft(supp.localId);
-    const choice = await modal('이미 보낸 화장실입니다', `<p><b>${esc(a.name)}</b></p><p>빈칸을 채우거나 답을 고치려면 <b>"빈칸 채우기·고치기"</b>를 누르세요.</p>`,
-      [{ label: '취소', value: '' }, { label: '처음부터 다시 조사', value: 're' }, { label: '빈칸 채우기·고치기', value: 'supp', primary: true }]);
+    const choice = await modal('이미 보낸 화장실입니다', `<p><b>${esc(a.name)}</b></p><p>빈칸을 채우거나 답을 고치려면 <b>"빈칸 채우기·고치기"</b>를 누르세요. 보낸 답을 확인만 하려면 <b>"제출한 내용 보기"</b>를 누르세요.</p>`,
+      [{ label: '빈칸 채우기·고치기', value: 'supp', primary: true }, { label: '📄 제출한 내용 보기', value: 'view' },
+        { label: '처음부터 다시 조사', value: 're' }, { label: '취소', value: '' }]);
     if (choice === 'supp') return startSupplementFromServer(st.tid);
+    if (choice === 'view') return renderSubmitted(st.tid);
     if (choice === 're') {
       if (!(await confirmBox('다시 조사', '<p>기존에 입력된 답변이 모두 삭제됩니다. 다시 시작하시겠습니까?</p>', '다시 시작', '취소'))) return;
       // 처음부터 새로 (이름·주소만 배정 목록에서), 같은 화장실번호의 다음 차수로 저장
@@ -625,6 +627,7 @@ async function renderHome() {
   $app.querySelectorAll('[data-fill]').forEach((b) => { b.onclick = () => { if (!needName()) startSupplementFromServer(b.dataset.fill); }; });
   $app.querySelectorAll('[data-supp]').forEach((b) => { b.onclick = () => { if (!needName()) startSupplementFromLocal(b.dataset.supp); }; });
   $app.querySelectorAll('[data-open]').forEach((b) => { b.onclick = () => openDraft(b.dataset.open); });
+  $app.querySelectorAll('[data-view]').forEach((b) => { b.onclick = () => renderSubmitted(b.dataset.view); });
   $app.querySelectorAll('[data-del]').forEach((b) => {
     b.onclick = async () => {
       const d = await drafts.get(b.dataset.del);
@@ -704,11 +707,15 @@ async function renderResurvey(mode = 'resurvey') {
       const chip = suppOpen.has(t.id) ? '<span class="status s-a-editing">보완 중</span>'
         : t.missing > 0 ? `<span class="status s-blank">빈칸 ${t.missing}개</span>`
           : t.missing === 0 ? '<span class="status s-a-done">다 채움</span>' : '';
-      return `<button class="card pick" data-id="${esc(t.id)}">
-      <div class="row"><b class="grow">${esc(t.name)}</b>${chip}</div><div class="sub">${esc(t.address)} ${esc(t.floor)} · ${esc(String(t.time).slice(0, 10))} 조사</div></button>`;
+      const inner = `<div class="row"><b class="grow">${esc(t.name)}</b>${chip}</div><div class="sub">${esc(t.address)} ${esc(t.floor)} · ${esc(String(t.time).slice(0, 10))} 조사</div>`;
+      // 지난 조사 보기·고치기: 카드를 누르면 고치기, 아래 버튼은 제출한 내용 보기 (버튼 안에 버튼을 넣지 않음)
+      return supp ? `<div class="card assign-card sent-card"><button class="assign-main" data-id="${esc(t.id)}">${inner}</button>
+        <div class="view-row"><button class="btn small" data-view="${esc(t.id)}">📄 제출한 내용 보기</button></div></div>`
+        : `<button class="card pick" data-id="${esc(t.id)}">${inner}</button>`;
     }).join('')
       : `<p class="hint">${q ? '찾는 화장실이 없습니다.' : `${esc(teamLabel(currentTeam()))}가 보낸 화장실이 아직 없습니다.`}</p>`;
     listEl.querySelectorAll('[data-id]').forEach((b) => { b.onclick = () => (supp ? startSupplementFromServer(b.dataset.id) : startResurvey(b.dataset.id)); });
+    listEl.querySelectorAll('[data-view]').forEach((b) => { b.onclick = () => renderSubmitted(b.dataset.view, { from: 'list' }); });
   };
   document.getElementById('q').addEventListener('input', (e) => { state.search = e.target.value; draw(); });
   try {
@@ -724,6 +731,65 @@ async function renderResurvey(mode = 'resurvey') {
       ${mine.map((d) => `<button class="card pick" data-local="${esc(d.localId)}"><b>${esc(d.toilet?.B0a || '(이름 없음)')}</b><div class="sub">${dateText(d.queuedAt)} 보냄${d.submission ? '' : ' · 인터넷 연결 후 열 수 있음'}</div></button>`).join('')}`;
     listEl.querySelectorAll('[data-local]').forEach((b) => { b.onclick = () => startSupplementFromLocal(b.dataset.local); });
   }
+}
+
+// ---------- 제출한 내용 보기 (읽기만) ----------
+/** 시트에 저장된 이 화장실의 최신 조사를 구역별로 보여 준다. 여기서는 고칠 수 없고, 아래 버튼으로 빈칸 채우기·고치기로 간다 */
+async function renderSubmitted(id, { from = 'home' } = {}) {
+  state.view = 'submitted';
+  const token = (state.viewToken = (state.viewToken || 0) + 1);
+  const back = from === 'list' ? () => renderResurvey('supplement') : renderHome;
+  const head = `<header class="bar"><div class="bar-row bar-row-title"><button class="btn" id="back">← ${from === 'list' ? '목록으로' : '처음으로'}</button><h1 class="bar-title">제출한 내용</h1></div></header>`;
+  const bind = () => {
+    document.getElementById('back').onclick = back;
+    document.getElementById('svHome')?.addEventListener('click', renderHome);
+    document.getElementById('svSupp')?.addEventListener('click', () => {
+      if (currentTeam()) { startSupplementFromServer(id); return; }
+      toast('먼저 오늘 활동하는 조를 눌러 주세요.');
+      renderHome();
+    });
+  };
+  const fail = (msg, retry) => {
+    $app.innerHTML = `${head}<main class="home"><div class="card warnbox sv-offline"><p class="big-text">${esc(msg)}</p>
+      <p class="sub">제출한 내용은 시트에서 불러옵니다.</p></div>
+      ${retry ? '<button class="btn primary big" id="svRetry">다시 불러오기</button>' : ''}<button class="btn big" id="svHome">처음 화면으로</button></main>`;
+    bind();
+    document.getElementById('svRetry')?.addEventListener('click', () => renderSubmitted(id, { from }));
+  };
+  if (!navigator.onLine) { fail('인터넷이 연결된 곳에서 볼 수 있습니다.', true); return; }
+  $app.innerHTML = `${head}<main class="home"><p class="loading sv-loading">제출한 내용을 불러오는 중…</p></main>`;
+  bind();
+  let rows;
+  try {
+    rows = await call('getToilet', { id });
+  } catch (e) {
+    if (state.view !== 'submitted' || state.viewToken !== token) return;
+    fail(!navigator.onLine || /인터넷/.test(e.message) ? '인터넷이 연결된 곳에서 볼 수 있습니다.' : `불러오지 못했습니다: ${e.message}`, true);
+    return;
+  }
+  if (state.view !== 'submitted' || state.viewToken !== token) return; // 그사이 다른 화면으로 갔으면 그리지 않음
+  if (!state.cfg) { fail('조사 항목을 불러와야 볼 수 있습니다.', false); return; }
+  const v = L.submittedView(state.cfg, rows);
+  const yn = (x) => (x === false ? '없음' : x ? '있음' : '미입력');
+  const ans = (a) => `<li class="sv-ans sv-${a.state}">${a.label ? `<span class="sv-space">${esc(a.label)}</span>` : ''}<span class="sv-val">${esc(a.text)}</span></li>`;
+  const sections = v.sections.map((s) => `<section class="card sv-section"><h2 class="sv-title">${esc(s.title)}</h2>
+    ${s.items.map((it) => `<div class="sv-item" data-code="${esc(it.code)}"><div class="sv-q">${esc(it.question)}</div><ul class="sv-list">${it.answers.map(ans).join('')}</ul></div>`).join('')}</section>`).join('');
+  $app.innerHTML = `${head}<main class="home sv">
+    <div class="card sv-head">
+      <p class="big-text"><b>${esc(v.name || '(이름 없음)')}</b></p>
+      ${v.address ? `<div class="sub">${esc(v.address)}</div>` : ''}
+      <p class="sv-meta">${esc(v.id)} · ${v.round}차${v.surveyor ? ` · ${esc(v.surveyor)} 조사` : ''}${v.time ? `<br>입력 ${esc(v.time)}` : ''}</p>
+      <p class="sv-meta">장애인 화장실 ${v.spaces.length}칸${v.spaces.length ? ` (${v.spaces.map(esc).join(', ')})` : ''}<br>
+      남자화장실 ${yn(v.hasMale)} · 여자화장실 ${yn(v.hasFemale)}</p>
+      <div class="sv-sum">${v.missing ? `<span class="status s-blank">필수 빈칸 ${v.missing}개</span>` : '<span class="status s-a-done">필수 모두 채움</span>'}</div>
+    </div>
+    <p class="hint">보낸 답을 확인만 하는 화면입니다. <b>빈칸</b>(주황)은 필수인데 비어 있는 칸입니다. 채우거나 고치려면 맨 아래 <b>"빈칸 채우기·고치기"</b>를 누르세요.</p>
+    ${sections}
+    <div class="sv-actions"><button class="btn primary big" id="svSupp">빈칸 채우기·고치기</button>
+    <button class="btn big" id="svHome">처음 화면으로</button></div>
+  </main>`;
+  bind();
+  window.scrollTo(0, 0);
 }
 
 const startResurvey = navTask(async (id, extra = {}) => {
@@ -1399,8 +1465,11 @@ function reviewHtml(draftPhotos) {
       ${warns.map(({ w, p }) => `<button class="btn list-btn" data-goto="${esc(p.id)}">${p.spaceLabel ? `[${esc(p.spaceLabel)}] ` : ''}${esc(w)}</button>`).join('')}</div>` : ''}
     ${d.mode === 'supplement'
     ? `<div class="card"><p class="big-text">${(() => { const b = L.buildSupplementPayload(state.cfg, d, ''); return `새로 채운 칸 <b>${b.filledCount}개</b> · 고친 칸 <b>${b.userEditCount}개</b>`; })()} · 새 사진 ${draftPhotos.filter((p) => !p.prior).length}장</p></div>
-      <button class="btn primary big" id="submit">보완 제출</button>
-      <p class="hint">빈칸은 채우고, ✏️ 고치기로 고친 칸은 새 값으로 바꿉니다. 그사이 다른 기기가 같은 칸을 먼저 고쳤으면 그 칸은 바꾸지 않고 알려 드립니다.</p>`
+      ${L.supplementUnchanged(state.cfg, d, draftPhotos.filter((p) => !p.prior).length)
+    ? `<button class="btn primary big" id="finishCheck">바뀐 내용 없음 · 확인 끝내기</button>
+      <p class="hint">새로 채우거나 고친 칸, 새 사진이 없어 보낼 것이 없습니다. 누르면 이 보완을 닫고 처음 화면으로 돌아갑니다. 시트의 값은 그대로입니다.</p>`
+    : `<button class="btn primary big" id="submit">보완 제출</button>
+      <p class="hint">빈칸은 채우고, ✏️ 고치기로 고친 칸은 새 값으로 바꿉니다. 그사이 다른 기기가 같은 칸을 먼저 고쳤으면 그 칸은 바꾸지 않고 알려 드립니다.</p>`}`
     : `<button class="btn primary big" id="submit">제출하기</button>
     <p class="hint">제출하면 휴대폰에 먼저 저장되고, 인터넷이 연결되면 자동으로 보냅니다. 제출한 뒤에도 빈칸은 처음 화면의 "마저 해야 할 화장실"이나 "지난 조사 보기·고치기"에서 채울 수 있습니다.</p>`}`;
 }
@@ -1430,7 +1499,8 @@ function bindPage(page) {
     $app.querySelectorAll('[data-goto]').forEach((b) => {
       b.onclick = () => { const i = L.pageIndex(state.pages, b.dataset.goto); goTo(i, false, b.dataset.code ? { ctx: b.dataset.ctx, code: b.dataset.code } : null); };
     });
-    document.getElementById('submit').onclick = submit;
+    document.getElementById('submit')?.addEventListener('click', submit);
+    document.getElementById('finishCheck')?.addEventListener('click', () => finishCheck(d));
   }
   $app.querySelectorAll('.item[data-code]').forEach((el) => {
     const ctx = el.dataset.ctx;
@@ -1554,13 +1624,38 @@ async function submit() {
 async function submitSupplement(d) {
   const { payload, count, filledCount, userEditCount } = L.buildSupplementPayload(state.cfg, d, nowText());
   const newPhotos = (await photos.byDraft(d.localId)).length;
-  if (!count && !newPhotos) { toast('새로 채우거나 고친 칸, 사진이 없습니다.'); return; }
+  if (!count && !newPhotos) {
+    const end = await modal('보낼 것이 없습니다', '<p>새로 채우거나 고친 칸, 사진이 없습니다.</p><p>확인만 하셨다면 <b>"확인 끝내기"</b>를 누르세요. 이 보완을 닫고 처음 화면으로 돌아갑니다.</p>',
+      [{ label: '돌아가기', value: false }, { label: '확인 끝내기', value: true, primary: true }]);
+    if (end) await finishCheck(d);
+    return;
+  }
   const ok = await confirmBox('보완 제출할까요?', `<p>새로 채운 칸 <b>${filledCount}개</b>${userEditCount ? `, 고친 칸 <b>${userEditCount}개</b>` : ''}, 사진 ${newPhotos}장을 ${esc(d.serverId)} ${d.round}차 조사에 반영합니다.</p>`, '보완 제출', '취소');
   if (!ok) return;
   Object.assign(d, { submission: payload, status: 'queued', queuedAt: Date.now(), error: '' });
   await drafts.put(d);
   toast(navigator.onLine ? '보완을 보내는 중입니다.' : '인터넷이 연결되면 자동으로 보냅니다.');
   processQueue();
+  renderHome();
+}
+
+/**
+ * 보완에서 바뀐 것이 없을 때: 아무것도 보내지 않고 이 보완 기록만 휴대폰에서 지운 뒤 처음 화면으로.
+ * 지우기 직전에 다시 확인해, 채운 칸·고친 칸·새 사진이 하나라도 있으면 지우지 않는다 (보내지 않은 것은 지우지 않음)
+ */
+async function finishCheck(d) {
+  if (!d || d.mode !== 'supplement' || d.status !== 'editing' || state.draft !== d) return;
+  clearTimeout(saveTimer);
+  const stored = await drafts.get(d.localId);
+  const newPhotos = (await photos.byDraft(d.localId)).length;
+  if (!stored || stored.status !== 'editing' || !L.supplementUnchanged(state.cfg, d, newPhotos)) {
+    toast('새로 채우거나 고친 칸이 있습니다. "보완 제출"을 눌러 주세요.');
+    if (state.draft === d && state.view === 'survey') keepScroll(renderPage);
+    return;
+  }
+  await drafts.remove(d.localId);
+  state.draft = null;
+  toast('확인을 마쳤습니다');
   renderHome();
 }
 

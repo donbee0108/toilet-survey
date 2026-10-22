@@ -289,3 +289,23 @@ button.progress { border: 0; border-radius: var(--radius); background: none; fon
 .ord-name { display: flex; align-items: flex-start; }
 .ord-name .ord-no { flex: none; }
 .ord-name .ord-text { flex: 1; min-width: 0; }
+/* 확인 창 버튼이 많으면(4개) 한 줄에 하나씩 */
+.modal-buttons.stack { flex-direction: column; }
+/* 지난 조사 보기·고치기 카드: 누르면 고치기 + 아래 '제출한 내용 보기' */
+.sent-card .view-row { padding: 0 18px 14px; }
+/* 제출한 내용 보기 (읽기만) */
+.sv-meta { margin: 6px 0; font-size: 17px; color: var(--sub); }
+.sv-sum { margin-top: 8px; }
+.sv-title { font-size: 20px; margin: 0 0 4px; padding: 4px 12px; background: var(--amber); border: 1.5px solid var(--amber-line); border-radius: 10px; }
+.sv-item { padding: 10px 0; border-top: 1px solid #ece8e2; }
+.sv-title + .sv-item { border-top: 0; }
+.sv-q { font-weight: 800; }
+.sv-list { list-style: none; margin: 4px 0 0; padding: 0; }
+.sv-ans { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; margin: 2px 0; }
+.sv-space { font-size: 17px; color: var(--sub); }
+.sv-space::after { content: ":"; }
+.sv-val { font-weight: 700; }
+.sv-empty .sv-val { color: var(--sub); font-weight: 600; }
+.sv-na .sv-val { color: var(--sub); background: #efedea; border: 1.5px solid #d9d4cc; border-radius: 999px; padding: 0 10px; font-weight: 600; }
+.sv-missing .sv-val { color: #7c2d12; background: var(--blank); border: 1.5px solid var(--blank-line); border-radius: 999px; padding: 0 10px; font-weight: 800; }
+.sv-actions { margin-top: 20px; }

@@ -889,6 +889,11 @@ export function buildSupplementPayload(cfg, draft, nowText) {
   };
 }
 
+/** 보완에서 보낼 것이 없는가 (새로 채운 칸·고친 칸·새 사진이 모두 없음) → '확인 끝내기'로 닫아도 잃는 것이 없음 */
+export function supplementUnchanged(cfg, draft, newPhotoCount) {
+  return draft.mode === 'supplement' && !newPhotoCount && buildSupplementPayload(cfg, draft, '').count === 0;
+}
+
 /** 제출한 조사(기기에 남은 기록)를 시트 행 모양으로 — 인터넷 없이 보완을 시작할 때 쓴다 */
 export function rowsFromSubmitted(d) {
   return {
@@ -896,6 +901,80 @@ export function rowsFromSubmitted(d) {
     spaces: d.submission.spaces.map((sp, i) => ({
       ...sp.values, 공간번호: d.spaceIds[d.spaceKeys[i]], 공간종류: sp.kind, 장애인화장실구분: sp.side, 순번: sp.seq,
     })),
+  };
+}
+
+/** 시트 값 하나를 화면 글자로: 선택은 보기 이름(여러 개는 ', '로), 숫자는 단위, 사진은 장수 */
+export function answerText(cfg, item, v) {
+  if (blank(v)) return '';
+  const s = String(v);
+  if (item.type === '선택(하나)' || item.type === MULTI) {
+    const opts = cfg.choices?.[item.list] || [];
+    const label = (x) => opts.find((o) => o.value === x)?.label || x;
+    return item.type === MULTI ? splitMulti(s).map(label).join(', ') : label(s);
+  }
+  if (item.type === PHOTO) return `${s}장`;
+  if (item.unit) return `${s} ${item.unit}`;
+  return s;
+}
+
+/** 시트의 입력시각(글자 또는 날짜) → 'yyyy-MM-dd HH:mm' */
+function timeText(v) {
+  if (blank(v)) return '';
+  const s = String(v);
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s)) {
+    const t = new Date(s);
+    if (!Number.isNaN(t.getTime())) {
+      const p = (n) => String(n).padStart(2, '0');
+      return `${t.getFullYear()}-${p(t.getMonth() + 1)}-${p(t.getDate())} ${p(t.getHours())}:${p(t.getMinutes())}`;
+    }
+  }
+  return s.slice(0, 16);
+}
+
+/**
+ * '제출한 내용 보기'(읽기만): 시트 행(getToilet) → 화면용 묶음.
+ * 보완과 같은 판단(supplementFromRows · 건너뛰기 · missingAll)을 그대로 써서
+ * 건너뛴 질문은 빼고, 'NA'는 해당 없음, 필수인데 비어 있으면 빈칸(missing)으로 표시한다.
+ * → { id, round, name, address, surveyor, time, spaces, hasMale, hasFemale, missing, sections: [{ title, items: [{ code, question, required, answers: [{ ctx, label, state, text }] }] }] }
+ *   state: value · na(해당 없음) · missing(필수 빈칸) · empty(선택 빈칸)
+ */
+export function submittedView(cfg, rows) {
+  const d = supplementFromRows(cfg, newDraft(), rows);
+  const missKeys = new Set(missingAll(cfg, d).map((m) => `${m.ctx}:${m.code}`));
+  // 보완과 같게: 시트에 줄(공간번호)이 있는 칸만, 없다고 답한 남자·여자화장실은 빼고
+  const spaces = allSpaces(d).filter((sp) => d.spaceIds[sp.key] && !(sp.key === MA && d.hasMale === false) && !(sp.key === FE && d.hasFemale === false));
+  const sections = new Map();
+  for (const it of cfg.items) {
+    const ctxs = it.tab === '화장실' ? [{ key: TOILET, label: '' }] : spaces.filter((sp) => appliesTo(it, sp.kind));
+    const answers = [];
+    for (const sp of ctxs) {
+      const ctx = sp.key;
+      if (!isVisible(cfg, d, ctx, it.code)) continue; // 건너뛴 질문은 보이지 않음
+      const raw = getRaw(d, ctx, it.code);
+      const k = `${ctx}:${it.code}`;
+      let state = 'value';
+      let text = '';
+      if (String(raw ?? '') === 'NA') { state = 'na'; text = '해당 없음'; }
+      else if (missKeys.has(k)) { state = 'missing'; text = '빈칸'; }
+      else if (blank(raw)) { state = 'empty'; text = '—'; }
+      else text = answerText(cfg, it, raw);
+      answers.push({ ctx, label: sp.label, state, text });
+    }
+    if (!answers.length) continue;
+    const title = it.section || '';
+    if (!sections.has(title)) sections.set(title, { title, items: [] });
+    sections.get(title).items.push({ code: it.code, question: it.question, required: !!it.required, answers });
+  }
+  const t = rows.toilet || {};
+  const byVarVal = (code) => { const it = cfg.byCode[code]; return it ? t[it.var] : ''; };
+  return {
+    id: rows.id, round: Number(rows.round),
+    name: String(byVarVal('B0a') || t['화장실이름'] || ''), address: String(byVarVal('B0b') || t['주소'] || ''),
+    surveyor: String(t['조사자'] ?? ''), time: timeText(t['입력시각']),
+    spaces: multiSpaces(d).map((sp) => sp.label), hasMale: d.hasMale, hasFemale: d.hasFemale,
+    missing: missKeys.size,
+    sections: [...sections.values()],
   };
 }
 
