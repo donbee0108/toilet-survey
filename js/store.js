@@ -35,10 +35,12 @@ async function tx(stores, mode, fn) {
     const t = db.transaction(stores, mode);
     const s = t.objectStore(Array.isArray(stores) ? stores[0] : stores);
     let result;
-    Promise.resolve(fn(s)).then((r) => { result = r; });
+    let failure = null;
+    // fn이 실패하면 거래를 취소한다 (반쯤 저장되지 않게)
+    Promise.resolve(fn(s)).then((r) => { result = r; }, (e) => { failure = e; try { t.abort(); } catch { /* 이미 끝남 */ } });
     t.oncomplete = () => resolve(result);
-    t.onerror = () => reject(t.error);
-    t.onabort = () => reject(t.error || new Error('저장 취소됨'));
+    t.onerror = () => reject(failure || t.error);
+    t.onabort = () => reject(failure || t.error || new Error('저장 취소됨'));
   });
 }
 
@@ -47,7 +49,23 @@ const req2p = (r) => new Promise((resolve, reject) => { r.onsuccess = () => reso
 export const drafts = {
   get: (id) => tx('drafts', 'readonly', (s) => req2p(s.get(id))),
   all: () => tx('drafts', 'readonly', (s) => req2p(s.getAll())),
-  put: (d) => tx('drafts', 'readwrite', (s) => { d.updatedAt = Date.now(); s.put(structuredClone(d)); }),
+  // rev: 저장할 때마다 1씩 올라가는 판 번호. 같은 기록을 다른 창이 먼저 저장했는지(내 화면이 오래된 것인지) 알아보는 데 쓴다
+  put: (d) => tx('drafts', 'readwrite', (s) => { d.updatedAt = Date.now(); d.rev = (d.rev || 0) + 1; s.put(structuredClone(d)); }),
+  /**
+   * 저장된 기록을 읽고 고쳐 쓰기를 한 거래로 (그 사이 다른 창이 끼어들 수 없음).
+   * fn(저장된 기록) → 저장할 기록, 또는 null(저장하지 않음). 저장한 기록(없으면 null)을 돌려준다.
+   */
+  update: (id, fn) => tx('drafts', 'readwrite', (s) => new Promise((resolve, reject) => {
+    const r = s.get(id);
+    r.onerror = () => reject(r.error);
+    r.onsuccess = () => {
+      try {
+        const next = fn(r.result);
+        if (next) { next.updatedAt = Date.now(); s.put(structuredClone(next)); }
+        resolve(next || null);
+      } catch (e) { reject(e); }
+    };
+  })),
   /** 고친 시각(updatedAt)을 바꾸지 않고 저장 — 다 보낸 기록을 작은 '보냄 기록'으로 줄일 때 (첫 화면 순서 유지) */
   putAsIs: (d) => tx('drafts', 'readwrite', (s) => { s.put(structuredClone(d)); }),
   remove: (id) => tx('drafts', 'readwrite', (s) => s.delete(id)),

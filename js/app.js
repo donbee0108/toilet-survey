@@ -34,17 +34,57 @@ function saveSoon() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveNow, 300);
 }
+// 화면에 열린 조사 기록이 저장소와 마지막으로 맞춰진 때의 입력값 (다른 창이 그사이 저장했는지 알아볼 때 기준)
+const synced = new WeakMap();
+function setDraft(d) {
+  state.draft = d;
+  if (d) synced.set(d, L.valuesSnapshot(d));
+  return d;
+}
+let joining = false; // 합치는 동안은 저장하지 않음 (합치는 중에 옛 기록이 다시 저장되지 않게)
 async function saveNow() {
   clearTimeout(saveTimer);
   const d = state.draft;
-  if (!d || d.status !== 'editing') return;
-  // 다른 창(예전에 열어 둔 탭)에서 그사이 보냈거나 정리·삭제된 기록이면 '입력 중'으로 되살리지 않는다
-  // (조사 기록은 화면에 열기 전에 늘 먼저 저장되므로, 저장소에 없으면 다른 곳에서 지운 것)
-  const stored = await drafts.get(d.localId);
-  if (!stored || stored.status !== 'editing' || stored.compact) return;
-  await drafts.put(d);
+  if (joining || !d || d.status !== 'editing') return;
+  // 다른 창(예전에 열어 둔 탭)에서 그사이 보냈거나 정리·삭제·합친 기록이면 '입력 중'으로 되살리지 않는다 (사용자에게 알리고 처음 화면으로).
+  // 같은 기록을 다른 창이 그사이 다시 저장했으면(판 번호 rev가 다름) 오래된 내 화면으로 덮어쓰지 않고 합친다:
+  // 다른 창이 적은 값은 남기고, 내가 마지막으로 맞춘 뒤 직접 바꾼 칸만 얹는다. 읽고 쓰기는 한 거래라 그 사이 끼어들 수 없다.
+  let merged = null;
+  let gone = false;
+  let atWrite = null; // 거래 안에서 실제로 저장에 쓴 입력값
+  const report = [];
+  const saved = await drafts.update(d.localId, (stored) => {
+    if (!stored || stored.status !== 'editing' || stored.compact) { gone = true; return null; }
+    atWrite = L.valuesSnapshot(d);
+    if ((stored.rev || 0) === (d.rev || 0)) { d.rev = (d.rev || 0) + 1; return d; }
+    merged = L.mergeDraftValues(stored, d, synced.get(d), report);
+    merged.rev = (stored.rev || 0) + 1;
+    return merged;
+  });
+  if (gone) {
+    if (state.draft === d && state.view === 'survey' && document.visibilityState === 'visible') {
+      toast('다른 창에서 합치거나 보낸 조사입니다. 처음 화면으로 갑니다.');
+      renderHome();
+    }
+    return;
+  }
+  if (!saved) return;
+  if (merged) {
+    const changed = !L.sameValues(L.valuesSnapshot(merged), atWrite); // 다른 창이 적은 값이 실제로 있었는가
+    const kept = L.adoptMerged(d, merged, atWrite); // 저장하는 사이 이 창에서 더 적은 칸은 그대로 둠
+    synced.set(d, L.valuesSnapshot(merged));
+    if (kept) saveSoon();
+    if (state.draft === d && state.view === 'survey') {
+      if (report.length) toast(`다른 창이 시트에 저장해 둔 값이 있어 ${report.length}칸은 시트 값이 남았습니다.`);
+      else if (changed) toast('다른 창에서 적은 내용을 합쳤습니다.');
+      if (changed || report.length) keepScroll(renderPage);
+    }
+    return;
+  }
+  synced.set(d, atWrite);
+  if (!L.sameValues(L.valuesSnapshot(d), atWrite)) saveSoon(); // 저장하는 사이 더 적은 값
 }
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveNow(); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' || state.view === 'survey') saveNow(); }); // 다시 보일 때도 한 번 맞춰, 다른 창에서 적은 값이 화면에 나오게
 window.addEventListener('pagehide', saveNow);
 
 function toast(msg) {
@@ -328,7 +368,8 @@ function assignCardHtml(a, allDrafts) {
     todo = `<div class="err">${esc(sum.failed.error || '보내지 못했습니다')} — 위 "지금 다시 보내기"를 눌러 주세요.</div>`;
   } else if (st.kind === 'editing') {
     const left = state.cfg ? L.missingAll(state.cfg, st.draft).length : 0;
-    todo = `<div class="todo">▶ 눌러서 이어서 하기${left ? ` · 필수 ${left}개 남음` : ' · 필수 모두 입력함'}</div>`;
+    const jt = L.joinTarget(a, st.draft);
+    todo = `<div class="todo">▶ 눌러서 이어서 하기${left ? ` · 필수 ${left}개 남음` : ' · 필수 모두 입력함'}</div>${jt ? `<div class="err">같은 조가 이미 보낸 화장실입니다 (${esc(jt)}) ${navigator.onLine ? '— 눌러서 합치기' : '— 인터넷이 연결되면 합칠 수 있습니다'}</div>` : ''}`;
   } else if (sum?.kind === 'supp') {
     chip = `<span class="status s-a-editing">보완 중${st.tid ? ` ${esc(st.tid)}` : ''}</span>`;
     todo = '<div class="todo">▶ 눌러서 보완 이어서 하기</div>';
@@ -467,7 +508,18 @@ const openAssignment = navTask(async (id) => {
   const a = (state.assignments || []).find((x) => x.id === id);
   if (!a) return;
   const st = L.assignmentStatus(a, await drafts.all(), { serverAt: state.assignmentsAt });
-  if (st.kind === 'editing') return openDraft(st.draft.localId);
+  if (st.kind === 'editing') {
+    // 같은 조 다른 휴대폰이 이미 시트에 보낸 화장실이면, 이 휴대폰의 새 조사를 따로 이어 가지 않고 합칠지 묻는다 (같은 화장실이 두 번 저장되는 것을 막음)
+    const tid = L.joinTarget(a, st.draft);
+    if (tid && !(navigator.onLine && apiUrl())) toast('같은 조가 이미 보낸 화장실입니다. 인터넷이 연결되면 합칠 수 있습니다.');
+    else if (tid) {
+      const choice = await offerJoin(a, st.draft, tid);
+      if (choice === 'join') return joinLocal(st.draft.localId, tid);
+      if (choice !== 'own') return;
+      await drafts.put({ ...st.draft, joinDeclined: true }); // 따로 이어 가기로 한 것은 다시 묻지 않음
+    }
+    return openDraft(st.draft.localId);
+  }
   if (st.kind === 'queued') { toast('이 휴대폰에서 이미 제출해 전송을 기다리는 화장실입니다.'); return; }
   if (st.kind === 'done') {
     const supp = (await drafts.all()).find((d) => d.mode === 'supplement' && d.status === 'editing' && d.serverId === st.tid);
@@ -489,21 +541,128 @@ const openAssignment = navTask(async (id) => {
   if (st.kind === 'todo' && navigator.onLine && apiUrl()) {
     const closeBusy = busyOverlay('확인 중…');
     let fresh = null;
-    const startedAt = Date.now();
-    try { fresh = await call('assignments', {}, { timeoutMs: 8000 }); } catch { /* 확인 못 하면 그대로 시작 */ } finally { closeBusy(); }
-    if (Array.isArray(fresh?.items)) {
-      state.assignments = fresh.items;
-      state.assignmentsAt = startedAt;
-      await kv.set('assignments', { items: fresh.items, fetchedAt: Date.now(), startedAt });
-      const a2 = fresh.items.find((x) => x.id === id);
-      const st2 = a2 && L.assignmentStatus(a2, await drafts.all(), { serverAt: startedAt });
+    try { fresh = await refreshAssignmentsNow(8000); } finally { closeBusy(); }
+    if (fresh) {
+      const a2 = fresh.find((x) => x.id === id);
+      const st2 = a2 && L.assignmentStatus(a2, await drafts.all(), { serverAt: state.assignmentsAt });
       if (st2?.kind === 'done') {
         toast('같은 조에서 이미 보낸 화장실입니다. 빈칸 채우기로 엽니다.');
         return startSupplementFromServer(st2.tid);
       }
+    } else {
+      // 신호가 약하거나 서버가 느려 확인하지 못함: 말없이 새 조사를 시작하면 같은 조가 이미 보낸 화장실이 두 번 저장될 수 있다
+      const go = await modal('시트에서 확인하지 못했습니다', '<p>같은 조 다른 분이 이 화장실을 이미 보냈는지 확인하지 못했습니다. 신호가 약해서일 수 있습니다.</p><p>이미 보냈다면 새로 시작하지 말고 잠시 뒤 <b>다시 확인</b>해 주세요. 새로 시작해 보내면 같은 화장실이 두 번 저장됩니다.</p>',
+        [{ label: '다시 확인', value: 'retry', primary: true }, { label: '그래도 새로 시작', value: 'new' }, { label: '취소', value: '' }]);
+      if (go === 'retry') return openAssignment(id);
+      if (go !== 'new') return;
     }
   }
   await begin(L.draftFromAssignment(a, { surveyor: teamLabel(currentTeam()) }));
+});
+
+/** 배정 목록을 지금 서버에서 받아 저장한다. 못 받으면(느림·끊김) null */
+async function refreshAssignmentsNow(timeoutMs) {
+  const startedAt = Date.now();
+  let res;
+  try { res = await call('assignments', {}, { timeoutMs }); } catch { return null; }
+  if (!Array.isArray(res?.items)) return null;
+  state.assignments = res.items;
+  state.assignmentsAt = startedAt;
+  await kv.set('assignments', { items: res.items, fetchedAt: Date.now(), startedAt });
+  return res.items;
+}
+
+/**
+ * 같은 조 다른 휴대폰이 이미 보낸 화장실에 이 휴대폰의 새 조사를 어떻게 할지 묻는다 → 'join' | 'own' | ''(취소).
+ * 묻기 전에 시트를 읽어 합쳤을 때 옮기지 못하는 답·사진이 얼마인지 미리 계산해 알려 준다 (아무것도 바꾸지 않음).
+ */
+async function offerJoin(a, d, tid) {
+  const typed = L.typedValueCount(d);
+  const myPhotos = await photos.byDraft(d.localId);
+  const mine = typed || myPhotos.length ? `이 휴대폰에서 지금까지 적은 <b>${typed}칸</b>${myPhotos.length ? `과 사진 <b>${myPhotos.length}장</b>` : ''}을 ` : '';
+  let prev = null;
+  let fail = '';
+  const closeBusy = busyOverlay('불러오는 중…');
+  try {
+    const rows = await call('getToilet', { id: tid }, { timeoutMs: 15000 });
+    if (Number(rows.round) >= 1) prev = L.joinPreview(state.cfg, d, rows); else fail = '이 화장실의 조사차수를 알 수 없습니다.';
+  } catch (e) { fail = e.message; } finally { closeBusy(); }
+  const head = `<p><b>${esc(a?.name || d.toilet.B0a || '')}</b> (${esc(tid)})은 같은 조 다른 휴대폰이 먼저 보냈습니다.</p>
+    <p>이 휴대폰에서 따로 계속 입력해 보내면 같은 화장실이 <b>두 번</b> 저장됩니다.</p>`;
+  if (!prev) {
+    return modal('같은 조에서 이미 보낸 화장실입니다', `${head}<p class="warn">시트를 불러오지 못해(${esc(fail)}) 합쳐도 되는지 미리 확인할 수 없습니다. 신호가 잡힐 때 다시 눌러 합쳐 주세요.</p>`,
+      [{ label: '따로 계속 입력 (새 기록으로 저장)', value: 'own' }, { label: '취소', value: '', primary: true }]);
+  }
+  const lostPhotos = myPhotos.filter((p) => p.spaceKey && !prev.spaceIds[p.spaceKey]).length;
+  const notes = [];
+  if (prev.dropped) notes.push(`시트에 없는 칸(장애인 화장실 칸 수가 다름)에 적은 답 <b>${prev.dropped}개</b>`);
+  if (lostPhotos) notes.push(`그 칸에서 찍은 사진 <b>${lostPhotos}장</b>`);
+  if (prev.conflicts.length) notes.push(`시트에 이미 다른 값이 있는 칸 <b>${prev.conflicts.length}개</b> (시트 값이 남음)`);
+  const warn = notes.length
+    ? `<p class="warn">합쳐도 시트로 옮기지 못하는 것: ${notes.join(', ')}. 이 휴대폰에 14일 동안 따로 보관되지만 시트에는 올라가지 않으니, 필요하면 다른 분과 확인해 주세요.</p>`
+    : '<p>적어 둔 답과 사진은 모두 옮길 수 있습니다.</p>';
+  return modal('같은 조에서 이미 보낸 화장실입니다', `${head}<p>${mine}시트의 조사에 <b>합쳐서 이어서 입력</b>하는 것을 권합니다. 시트에 이미 있는 칸은 그대로 남습니다.</p>${warn}`,
+    [{ label: '합쳐서 이어서 입력', value: 'join', primary: true }, { label: '따로 계속 입력 (새 기록으로 저장)', value: 'own' }, { label: '취소', value: '' }]);
+}
+
+let joinBusy = false;
+/**
+ * 이 휴대폰의 아직 보내지 않은 새 조사를, 같은 조가 이미 시트에 보낸 같은 화장실(tid)의 보완으로 합친다.
+ * 시트에 있는 칸은 저장됨으로 잠그고, 이 휴대폰에서 적은 것 중 시트에 없는 칸·사진만 옮겨 이어서 입력한다.
+ * 합친 뒤 이 휴대폰의 새 조사 기록은 지우지 않고 '합친 기록'(status 'joined')으로 14일 보관한다 — 전송·정리·첫 화면 카드에서는 빠지고,
+ * 옮기지 못한 답·사진은 거기에 남는다. 시트를 읽지 못하면 아무것도 바꾸지 않는다.
+ */
+const joinLocal = navTask(async (localId, tid) => {
+  if (joinBusy) return;
+  joinBusy = true;
+  const startDraft = state.draft;
+  try {
+    await saveNow();
+    const closeBusy = busyOverlay('불러오는 중…');
+    let rows;
+    try { rows = await call('getToilet', { id: tid }, { timeoutMs: 15000 }); } catch (e) { closeBusy(); toast(`시트에서 불러오지 못했습니다: ${e.message}`); return; }
+    closeBusy();
+    await saveNow(); // 기다리는 사이 더 적은 값까지 저장한 뒤 그 기록으로 합친다
+    const local = await drafts.get(localId);
+    if (!local || local.status !== 'editing' || local.mode === 'supplement' || local.serverId) { toast('이 조사는 이미 바뀌어 합칠 수 없습니다.'); return; }
+    if (!(Number(rows.round) >= 1)) { toast('이 화장실의 조사차수를 알 수 없어 합칠 수 없습니다. 관리자에게 알려 주세요.'); return; }
+    joining = true; // 이제부터 옛 기록이 저장되지 않게
+    // 같은 화장실을 이미 보완하던 중이면 그 기록에 합친다 (같은 보완이 두 개 생기지 않게)
+    const open = (await drafts.all()).find((x) => x.mode === 'supplement' && x.status === 'editing' && x.serverId === rows.id);
+    let s;
+    let res;
+    if (open) {
+      s = open;
+      const c = L.carryTyped(state.cfg, s, local, { skipUntouchedPrefill: true });
+      res = { joinDropped: c.dropped, joinConflicts: c.conflicts };
+    } else {
+      s = L.supplementFromLocal(state.cfg, local, rows);
+      res = s;
+    }
+    await drafts.put(s);
+    // 사진: 시트에 없는 칸의 사진은 올릴 곳이 없어 합친 기록에 남긴다 (지우지 않음)
+    let keptPhotos = 0;
+    for (const p of await photos.byDraft(local.localId)) {
+      if (p.spaceKey && !s.spaceIds[p.spaceKey]) { keptPhotos++; continue; }
+      await photos.put({ ...p, localId: s.localId });
+    }
+    Object.assign(local, { status: 'joined', joinedInto: s.serverId, joinedAt: Date.now() });
+    await drafts.put(local);
+    const stay = state.draft === startDraft; // 그사이 다른 화면으로 가지 않았을 때만 끌고 옴
+    if (stay) { setDraft(s); enterSurvey(); toast(`같은 화장실(${tid})에 합쳤습니다. 이어서 입력하세요.`); }
+    else { toast(`같은 화장실(${tid})에 합쳤습니다. 처음 화면에서 이어서 할 수 있습니다.`); if (state.view === 'home') renderHome(); }
+    if (stay && (res.joinConflicts.length || res.joinDropped || keptPhotos)) {
+      const name = (c) => { const it = state.cfg.byCode[c.code]; const lb = L.spaceInfo(s, c.ctx)?.label; return `${lb ? `[${esc(lb)}] ` : ''}${esc(it.question)}`; };
+      await modal('합치면서 옮기지 못한 것', `${res.joinConflicts.length ? `<p>같은 칸이 시트에 이미 다른 값으로 있어 시트 값이 남습니다 (${res.joinConflicts.length}칸).</p><ul>${res.joinConflicts.map((c) => `<li>${name(c)}: 내 답 <b>${esc(c.mine)}</b> / 시트 <b>${esc(c.theirs)}</b></li>`).join('')}</ul>` : ''}
+        ${res.joinDropped ? `<p>시트에 없는 칸(장애인 화장실 칸 수가 다름)의 답 ${res.joinDropped}개는 시트로 옮기지 못했습니다.</p>` : ''}
+        ${keptPhotos ? `<p>그 칸에서 찍은 사진 ${keptPhotos}장은 올리지 않았습니다.</p>` : ''}
+        <p>옮기지 못한 것은 이 휴대폰에 14일 동안 따로 보관됩니다 (처음 화면 아래 설정·정보).</p>`,
+      [{ label: '확인', value: true, primary: true }]);
+    }
+  } finally {
+    joining = false;
+    joinBusy = false;
+  }
 });
 function useConfig(data, fetchedAt, fromCache) {
   state.cfg = L.prepareConfig(structuredClone(data));
@@ -541,7 +700,9 @@ async function renderHome() {
     state.pendingCfg = null;
     toast('조사 항목이 새로 바뀌었습니다.');
   }
-  const all = (await drafts.all()).sort((a, b) => b.updatedAt - a.updatedAt);
+  const all0 = (await drafts.all()).sort((a, b) => b.updatedAt - a.updatedAt);
+  const all = all0.filter((d) => d.status !== 'joined'); // 합친 기록은 보관만 (카드·전송에서 빠짐)
+  const joinedOld = all0.filter((d) => d.status === 'joined');
   const allPhotos = await photos.all();
   const photoStat = (id) => {
     const ps = allPhotos.filter((p) => p.localId === id);
@@ -598,6 +759,7 @@ async function renderHome() {
       <button class="btn" id="reload">조사 항목 새로 불러오기</button>
       <button class="btn" id="resetpw">비밀번호 다시 입력</button>
       <button class="btn" id="clean">완료된 기록 정리</button>
+      ${joinedOld.length ? `<p class="hint">합치기 전에 이 휴대폰에서 적은 기록 ${joinedOld.length}건을 14일 동안 보관 중입니다 (시트로 옮기지 못한 답·사진이 있을 때 확인용).</p><button class="btn" id="dropJoined">합치기 전 기록 지우기</button>` : ''}
       <p class="hint">다 보낸 조사(사진 포함)는 저절로 이 휴대폰에서 지워집니다. 시트에는 그대로 남습니다. "완료된 기록 정리"는 남은 '보냄' 표시까지 바로 지울 때만 누르면 됩니다.</p>
     </details>
   </main>`;
@@ -651,6 +813,11 @@ async function renderHome() {
       for (const p of await photos.byDraft(d.localId)) await photos.remove(p.photoId);
       await drafts.remove(d.localId);
     }
+    renderHome();
+  });
+  document.getElementById('dropJoined')?.addEventListener('click', async () => {
+    if (!await confirmBox('합치기 전 기록 지우기', `<p>합치기 전에 적은 기록 ${joinedOld.length}건과 그 사진을 이 휴대폰에서 지울까요? 시트로 옮긴 내용은 그대로입니다.</p>`, '지우기', '취소')) return;
+    for (const d of joinedOld) { for (const p of await photos.byDraft(d.localId)) await photos.remove(p.photoId); await drafts.remove(d.localId); }
     renderHome();
   });
   document.getElementById('reload').onclick = async () => { await loadConfig({ force: true }); renderHome(); };
@@ -833,7 +1000,7 @@ async function pullFresh({ manual }) {
   const res = L.mergeFresh(state.cfg, d, prev);
   if (!res.ok) {
     d.freshAt = Date.now();
-    if (manual || !d.freshWarned) { d.freshWarned = true; toast(res.reason + ' 이 보완은 제출해도 저장되지 않을 수 있습니다.'); }
+    if (manual || !d.freshWarned) { d.freshWarned = true; toast(res.reason + (res.guarded ? '' : ' 이 보완은 제출해도 저장되지 않을 수 있습니다.')); }
     return;
   }
   await saveNow();
@@ -893,7 +1060,7 @@ async function beginSupplement(rows, { fromServer = false } = {}) {
   const d = L.supplementFromRows(state.cfg, L.newDraft({ surveyor: teamLabel(currentTeam()) }), rows);
   if (fromServer) d.freshAt = Date.now(); // 방금 시트에서 불러왔으니 바로 다시 불러오지 않음
   await drafts.put(d);
-  state.draft = d;
+  setDraft(d);
   enterSurvey(); // 보완은 위치를 다시 잡지 않는다
 }
 
@@ -904,13 +1071,13 @@ async function startNew() {
 
 async function begin(d) {
   await drafts.put(d);
-  state.draft = d;
+  setDraft(d);
   captureLocation();
   enterSurvey();
 }
 
 async function openDraft(id) {
-  state.draft = await drafts.get(id);
+  setDraft(await drafts.get(id));
   if (!state.draft) return renderHome();
   enterSurvey();
 }
@@ -1031,6 +1198,7 @@ function numberWarningsOnPage(page) {
 
 async function renderPage() {
   const d = state.draft;
+  if (!d || state.view !== 'survey') return; // 그사이 처음 화면으로 나갔으면(다른 창에서 합침 등) 그리지 않음
   if (d.mode === 'supplement' && L.reopenSkipped(state.cfg, d)) saveSoon();
   refreshPages();
   let page = currentPage();
@@ -1311,7 +1479,7 @@ async function runSplit(d, page) {
   processQueue();
   // 그사이 다른 화면으로 갔으면 끌고 오지 않는다 (처음 화면 '마저 해야 할 화장실'에서 이어서 할 수 있음)
   if (state.draft !== d || state.view !== 'survey') { toast('나눠서 조사를 시작했습니다. 처음 화면에서 이어서 할 수 있습니다.'); return; }
-  state.draft = s;
+  setDraft(s);
   await renderPage();
   window.scrollTo(0, 0);
   toast('나눠서 조사를 시작했습니다. 이어서 입력하세요.');
@@ -1600,11 +1768,13 @@ async function keepScroll(fn) {
 
 async function submit() {
   const d = state.draft;
+  await saveNow(); // 다른 창이 그사이 저장한 값이 있으면 먼저 합친 뒤 그 내용으로 보낸다 (오래된 화면으로 보내 덮어쓰지 않게)
   if (L.invalidAll(state.cfg, d).length) {
     await modal('제출할 수 없습니다', '<p>"꼭 고쳐야 하는 숫자"를 먼저 고쳐 주세요. 길이는 cm 정수(소수점 없이)로 적습니다.</p>', [{ label: '확인', value: true, primary: true }]);
     return;
   }
   if (d.mode === 'supplement') return submitSupplement(d);
+  if (await interceptDuplicate(d)) return;
   const missing = L.missingAll(state.cfg, d);
   const { payload, spaceKeys } = L.buildSubmission(state.cfg, d, nowText());
   // 장애인 화장실 개수를 줄여 없어진 칸의 사진은 올리지 않는다
@@ -1612,13 +1782,52 @@ async function submit() {
   const ok = await confirmBox('제출할까요?', `${missing.length ? `<p>비어 있는 필수 항목이 <b>${missing.length}개</b> 있습니다. 비어 있는 채로 제출하면 '조사 안 함'으로 저장됩니다.</p>` : ''}
     ${orphan.length ? `<p>지금은 없는 칸에서 찍은 사진 ${orphan.length}장은 올리지 않고 지웁니다.</p>` : ''}<p>제출한 뒤에도 "지난 조사 보기·고치기"에서 빈칸을 채우거나 답을 고칠 수 있습니다.</p>`, '제출', '취소');
   if (!ok) return;
-  for (const p of orphan) await photos.remove(p.photoId);
   delete payload.password;
-  Object.assign(d, { submission: payload, spaceKeys, status: 'queued', queuedAt: Date.now(), error: '' });
-  await drafts.put(d);
+  if (!(await commitQueued(d, { submission: payload, spaceKeys, status: 'queued', queuedAt: Date.now(), error: '' }))) return;
+  for (const p of orphan) await photos.remove(p.photoId);
   toast(navigator.onLine ? '제출했습니다. 보내는 중입니다.' : '제출했습니다. 인터넷이 연결되면 자동으로 보냅니다.');
   processQueue();
   renderHome();
+}
+
+/**
+ * 활동 목록에서 시작한 새 조사를 처음 보내기 전에: 같은 조 다른 휴대폰이 그사이 같은 화장실을 이미 보냈는지 시트로 확인한다.
+ * 보냈으면 따로 보내지 않고 합칠지 묻는다. 확인을 못 하면(끊김·느림) 막지 않고 그대로 보낸다. 처리했으면(합침·취소) true
+ */
+async function interceptDuplicate(d) {
+  if (!d.assignId || d.resurveyOf || d.serverId || d.splitTried || d.joinDeclined || !navigator.onLine || !apiUrl()) return false;
+  await saveNow();
+  const closeBusy = busyOverlay('확인 중…');
+  try { await refreshAssignmentsNow(6000); } finally { closeBusy(); }
+  if (state.draft !== d) return true;
+  const a = (state.assignments || []).find((x) => x.id === d.assignId);
+  const tid = L.joinTarget(a, d);
+  if (!tid) return false;
+  const choice = await offerJoin(a, d, tid);
+  if (choice === 'join') { await joinLocal(d.localId, tid); return true; }
+  if (choice !== 'own') return true;
+  d.joinDeclined = true; // 따로 보내기로 한 것은 다시 묻지 않음
+  await saveNow();
+  return false;
+}
+
+/**
+ * 보내기로 확정: 저장소의 기록이 아직 '입력 중'이고 내 화면과 같은 판일 때만 '전송 대기'로 바꿔 저장한다 (한 거래).
+ * 다른 창에서 이미 합치거나 보냈으면(없거나 입력 중이 아님) 알리고 처음 화면으로, 다른 창이 먼저 바꿨으면 맞춰 보여 주고 멈춘다. 저장했으면 true
+ */
+async function commitQueued(d, fields) {
+  let why = '';
+  const saved = await drafts.update(d.localId, (stored) => {
+    if (!stored || stored.status !== 'editing') { why = 'gone'; return null; }
+    if ((stored.rev || 0) !== (d.rev || 0)) { why = 'stale'; return null; }
+    Object.assign(d, fields);
+    d.rev = (d.rev || 0) + 1;
+    return d;
+  });
+  if (saved) return true;
+  if (why === 'gone') { toast('다른 창에서 합치거나 보낸 조사입니다. 처음 화면으로 갑니다.'); renderHome(); }
+  else { toast('다른 창에서 먼저 바뀐 내용이 있어 맞췄습니다. 확인하고 다시 눌러 주세요.'); await saveNow(); if (state.draft === d) keepScroll(renderPage); }
+  return false;
 }
 
 async function submitSupplement(d) {
@@ -1632,8 +1841,7 @@ async function submitSupplement(d) {
   }
   const ok = await confirmBox('보완 제출할까요?', `<p>새로 채운 칸 <b>${filledCount}개</b>${userEditCount ? `, 고친 칸 <b>${userEditCount}개</b>` : ''}, 사진 ${newPhotos}장을 ${esc(d.serverId)} ${d.round}차 조사에 반영합니다.</p>`, '보완 제출', '취소');
   if (!ok) return;
-  Object.assign(d, { submission: payload, status: 'queued', queuedAt: Date.now(), error: '' });
-  await drafts.put(d);
+  if (!(await commitQueued(d, { submission: payload, status: 'queued', queuedAt: Date.now(), error: '' }))) return;
   toast(navigator.onLine ? '보완을 보내는 중입니다.' : '인터넷이 연결되면 자동으로 보냅니다.');
   processQueue();
   renderHome();
@@ -1645,7 +1853,7 @@ async function submitSupplement(d) {
  */
 async function finishCheck(d) {
   if (!d || d.mode !== 'supplement' || d.status !== 'editing' || state.draft !== d) return;
-  clearTimeout(saveTimer);
+  await saveNow(); // 다른 창이 그사이 적은 값이 있으면 먼저 합쳐서 확인한다 (그 값을 모른 채 기록을 지우지 않게)
   const stored = await drafts.get(d.localId);
   const newPhotos = (await photos.byDraft(d.localId)).length;
   if (!stored || stored.status !== 'editing' || !L.supplementUnchanged(state.cfg, d, newPhotos)) {

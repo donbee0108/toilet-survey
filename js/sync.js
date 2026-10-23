@@ -1,7 +1,7 @@
 // 전송 대기열: 제출한 조사를 서버에 보내고, 이어서 사진을 올린다.
 // 같은 조사를 여러 번 보내도 서버가 clientId로 중복을 막으므로, 실패하면 그냥 다시 보내면 된다.
 import { drafts, photos, kv } from './store.js';
-import { applySubmitResult, restAfterDuplicate, prepareConfig, canCompact, receiptOf, receiptExpired } from './logic.js';
+import { applySubmitResult, restAfterDuplicate, prepareConfig, canCompact, receiptOf, receiptExpired, joinedExpired } from './logic.js';
 import { call } from './api.js';
 import { blobToBase64 } from './photo.js';
 
@@ -104,6 +104,10 @@ export async function cleanSent() {
         await drafts.putAsIs(receiptOf(d));
         n++;
       } else if (receiptExpired(d)) {
+        await drafts.remove(d.localId);
+        n++;
+      } else if (joinedExpired(d)) { // 합치기 전 보관 기록: 보관 기간이 지나면 사진과 함께 지움
+        for (const p of mine) await photos.remove(p.photoId);
         await drafts.remove(d.localId);
         n++;
       }

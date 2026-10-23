@@ -789,6 +789,17 @@ export function mergeFresh(cfg, draft, prev) {
       setRaw(fresh, ctx, code, v);
     }
   }
+  // 안전장치: 이 휴대폰에서 적고 아직 보내지 않은 값은 겹친 칸으로 알린 것 말고는 하나도 사라지거나 바뀌면 안 된다.
+  // 어긋나면 합치지 않고 그대로 둔다 (불러오기가 입력한 값을 지우는 일이 없도록)
+  const conflictKeys = new Set(conflicts.map((c) => `${c.ctx}:${c.code}`));
+  const lost = mine.filter(({ ctx, code, v }) => {
+    if (conflictKeys.has(`${ctx}:${code}`)) return false;
+    const now = getRaw(fresh, ctx, code);
+    return String(normalize(cfg.byCode[code], now)) !== String(normalize(cfg.byCode[code], v));
+  });
+  if (lost.length) {
+    return { ok: false, guarded: true, lost, reason: `불러온 값이 이 휴대폰에서 적은 ${lost.length}칸을 지울 수 있어 합치지 않았습니다.` };
+  }
   const added = Object.keys(fresh.locked).filter((k) => !before.has(k)).length;
   Object.assign(draft, {
     toilet: fresh.toilet, spaces: fresh.spaces, locked: fresh.locked, orig: fresh.orig,
@@ -1280,14 +1291,93 @@ export function supplementAfterSplit(cfg, sent, { rows = null, trustSubmission =
   d.splitFrom = sent.localId;
   d.freshAt = now; // 방금 보낸 값이므로 바로 다시 불러오지 않음
   // 이 휴대폰에서 적었지만 서버에 아직 없는 답은 빈칸이 아니라 '입력한 값'(잠기지 않음)으로 옮긴다 → 보완 제출 때 보냄
+  const { carried, dropped } = carryTyped(cfg, d, current);
+  return Object.assign(d, { splitCarried: carried, splitDropped: dropped });
+}
+
+/** 입력값만 뽑은 사본 — 저장소와 마지막으로 맞춘 상태를 기억해 두는 데 쓴다 (mergeDraftValues의 기준) */
+export function valuesSnapshot(d) {
+  return {
+    toilet: { ...(d.toilet || {}) },
+    spaces: Object.fromEntries(Object.entries(d.spaces || {}).map(([k, sp]) => [k, { ...(sp.values || {}) }])),
+    hasMale: d.hasMale, hasFemale: d.hasFemale,
+  };
+}
+
+/**
+ * 같은 조사 기록을 다른 창(같은 휴대폰의 홈 화면 앱과 브라우저 탭 등)이 먼저 저장해서, 이 창의 화면(mine)이 저장된 것(stored)보다 오래됐을 때 합친다.
+ * 이 창이 마지막으로 저장소와 맞춘 뒤(base) 직접 바꾼 칸만 저장된 기록 위에 얹는다 — 다른 창이 적은 값은 그대로 남고,
+ * 이 창이 적은 값도 사라지지 않는다. 시트에 이미 저장돼 잠긴 칸은 건드리지 않는다.
+ * base가 없으면(어느 쪽이 새로운지 모름) 저장된 기록의 빈칸에 이 창의 값만 채운다. 합친 새 기록을 돌려준다.
+ */
+export function mergeDraftValues(stored, mine, base, report = []) {
+  const out = structuredClone(stored);
+  out.toilet = out.toilet || {};
+  out.spaces = out.spaces || {};
+  out.touched = out.touched || {};
+  // 시트에서 받은 값·잠금(보완)은 시트를 더 최근에 불러온 쪽 것을 쓴다 (잠금은 시트를 불러올 때마다 다시 정해지므로 섞지 않는다)
+  if ((mine.freshAt || 0) > (stored.freshAt || 0)) {
+    for (const k of ['locked', 'orig', 'replaceable', 'unlocked', 'reopened', 'spaceIds']) out[k] = structuredClone(mine[k] || {});
+    Object.assign(out, { hasMale: mine.hasMale, hasFemale: mine.hasFemale, freshAt: mine.freshAt });
+    for (const key of Object.keys(out.locked)) {
+      if (out.unlocked[key]) continue;
+      const i = key.indexOf(':');
+      setRaw(out, key.slice(0, i), key.slice(i + 1), getRaw(mine, key.slice(0, i), key.slice(i + 1)) ?? ''); // 잠긴 칸 = 시트 값
+    }
+  }
+  const apply = (ctx, code, v) => {
+    const key = `${ctx}:${code}`;
+    if (out.locked?.[key] && !out.unlocked?.[key]) { // 시트에 저장된 칸: 다른 값이면 겹친 칸으로 알림
+      const theirs = getRaw(out, ctx, code);
+      if (!blank(v) && String(theirs ?? '') !== String(v)) report.push({ ctx, code, mine: v, theirs });
+      return;
+    }
+    setRaw(out, ctx, code, v);
+    if (mine.touched?.[key]) out.touched[key] = true;
+  };
+  const diff = (ctx, mineVals, baseVals) => {
+    for (const code of new Set([...Object.keys(mineVals || {}), ...Object.keys(baseVals || {})])) {
+      const m = mineVals?.[code];
+      if (!base) { if (!blank(m) && blank(getRaw(out, ctx, code))) apply(ctx, code, m); continue; }
+      if (String(m ?? '') !== String(baseVals?.[code] ?? '')) apply(ctx, code, m ?? '');
+    }
+  };
+  diff(TOILET, mine.toilet, base?.toilet);
+  for (const key of new Set([...Object.keys(mine.spaces || {}), ...Object.keys(base?.spaces || {})])) diff(key, mine.spaces?.[key]?.values, base?.spaces?.[key]?.values);
+  for (const k of ['hasMale', 'hasFemale']) if (base && mine[k] !== base[k]) out[k] = mine[k];
+  out.pageId = mine.pageId;
+  // 이 창에만 있는 상태(값이 아닌 것)도 잃지 않게: 한 번 켜지면 계속 켜지는 표시와 위치
+  for (const k of ['joinDeclined', 'splitTried']) if (mine[k]) out[k] = mine[k];
+  for (const k of ['lat', 'lng', 'gpsAccuracy']) if (out[k] == null && mine[k] != null) out[k] = mine[k];
+  if (out.lat != null) out.gpsError = ''; else if (mine.gpsError) out.gpsError = mine.gpsError;
+  return out;
+}
+
+/**
+ * 이 휴대폰에서 적었지만 서버에 아직 없는 답을 보완 기록(d)에 '입력한 값'(잠기지 않음)으로 옮긴다 → 보완 제출 때 보냄.
+ * - 서버에 이미 값이 있는 칸(잠긴 칸)은 그대로 둔다: 서버 값이 남는다. 값이 다르면 겹친 칸(conflicts)으로 알려 준다.
+ * - d에 이미 입력한 값이 있는 칸도 그대로 둔다 (이미 적은 것을 덮어쓰지 않음).
+ * - 서버에 줄이 없는 칸(공간)의 답은 넣을 곳이 없어 못 옮긴다(dropped).
+ * → { carried, dropped, conflicts: [{ctx, code, mine, theirs}] }
+ */
+export function carryTyped(cfg, d, current, { skipUntouchedPrefill = false } = {}) {
   let carried = 0;
   let dropped = 0;
+  const conflicts = [];
   const carry = (ctx, values) => {
     for (const [code, v] of Object.entries(values || {})) {
       if (blank(v) || !cfg.byCode[code]) continue;
-      if (ctx !== TOILET && !d.spaceIds[ctx]) { dropped++; continue; } // 서버에 없는 칸
       const key = `${ctx}:${code}`;
-      if (d.locked[key] || !blank(getRaw(d, ctx, code))) continue; // 서버에 이미 값이 있음
+      // 활동 목록·이전 조사에서 미리 채워진 채 손대지 않은 값은 직접 적은 답이 아니다
+      if (skipUntouchedPrefill && current.prefilled?.[key] && !current.touched?.[key]) continue;
+      if (ctx !== TOILET && !d.spaceIds[ctx]) { dropped++; continue; } // 서버에 없는 칸
+      if (d.locked[key]) { // 서버에 이미 값이 있음
+        if (cfg.byCode[code].type === PHOTO) continue; // 사진 장수는 올린 사진 수로 정해지는 값이라 겹친 칸이 아님
+        const theirs = getRaw(d, ctx, code);
+        if (String(normalize(cfg.byCode[code], theirs)) !== String(normalize(cfg.byCode[code], v))) conflicts.push({ ctx, code, mine: v, theirs });
+        continue;
+      }
+      if (!blank(getRaw(d, ctx, code))) continue;
       setRaw(d, ctx, code, v);
       d.touched[key] = true;
       carried++;
@@ -1295,7 +1385,87 @@ export function supplementAfterSplit(cfg, sent, { rows = null, trustSubmission =
   };
   carry(TOILET, current.toilet);
   for (const [key, sp] of Object.entries(current.spaces || {})) carry(key, sp.values);
-  return Object.assign(d, { splitCarried: carried, splitDropped: dropped });
+  return { carried, dropped, conflicts };
+}
+
+/** 이 휴대폰에서 직접 적은(활동 목록 값·이전 조사 값을 그대로 둔 것은 뺀) 값이 있는 칸 수 */
+export function typedValueCount(draft) {
+  let n = 0;
+  const count = (ctx, values) => {
+    for (const [code, v] of Object.entries(values || {})) {
+      if (blank(v)) continue;
+      const key = `${ctx}:${code}`;
+      if (draft.prefilled?.[key] && !draft.touched?.[key]) continue;
+      n++;
+    }
+  };
+  count(TOILET, draft.toilet);
+  for (const [key, sp] of Object.entries(draft.spaces || {})) count(key, sp.values);
+  return n;
+}
+
+/**
+ * 합치기 전에 미리 보기: 아무것도 바꾸지 않고, 합치면 옮겨지는 칸·못 옮기는 칸·시트와 겹치는 칸을 센다.
+ * → { carried, dropped, conflicts, spaceIds } (spaceIds: 시트에 있는 칸 — 그 밖의 칸에서 찍은 사진은 못 옮김)
+ */
+export function joinPreview(cfg, local, rows) {
+  const s = supplementFromLocal(cfg, local, rows);
+  return { carried: s.joinCarried, dropped: s.joinDropped, conflicts: s.joinConflicts, spaceIds: s.spaceIds };
+}
+
+/** 합치기 전 기록(status 'joined')은 되돌릴 수 있도록 이 기간 보관한다 */
+export const JOINED_KEEP_MS = 14 * 24 * 3600 * 1000;
+export const joinedExpired = (d, now = Date.now()) => d.status === 'joined' && now - (d.joinedAt || d.updatedAt || 0) > JOINED_KEEP_MS;
+
+/** 입력값 사본 두 개가 같은가 (칸 순서와 무관하게) */
+export function sameValues(a, b) {
+  const sort = (x) => (Array.isArray(x) || x === null || typeof x !== 'object' ? x : Object.fromEntries(Object.keys(x).sort().map((k) => [k, sort(x[k])])));
+  return JSON.stringify(sort(a)) === JSON.stringify(sort(b));
+}
+
+/**
+ * 저장하는 사이에 이 창에서 더 적은 칸(atWrite 이후 바뀐 칸)은 그대로 두고, 나머지는 저장된(합친) 기록(merged)으로 맞춘다.
+ * 다른 창에서 온 값을 받아들이면서 방금 친 글자를 덮어쓰지 않기 위함. 그대로 둔 칸 수를 돌려준다.
+ */
+export function adoptMerged(d, merged, atWrite) {
+  const kept = [];
+  const scan = (ctx, cur, wrote) => {
+    for (const code of new Set([...Object.keys(cur || {}), ...Object.keys(wrote || {})])) {
+      if (String(cur?.[code] ?? '') !== String(wrote?.[code] ?? '')) kept.push([ctx, code, cur?.[code] ?? '', !!d.touched?.[`${ctx}:${code}`]]);
+    }
+  };
+  const now = valuesSnapshot(d);
+  scan(TOILET, now.toilet, atWrite.toilet);
+  for (const key of new Set([...Object.keys(now.spaces), ...Object.keys(atWrite.spaces || {})])) scan(key, now.spaces[key], atWrite.spaces?.[key]);
+  Object.assign(d, structuredClone(merged));
+  for (const [ctx, code, v, t] of kept) { setRaw(d, ctx, code, v); if (t) d.touched[`${ctx}:${code}`] = true; }
+  return kept.length;
+}
+
+/**
+ * 같은 조 다른 휴대폰이 이미 시트에 보낸 화장실(rows)에, 이 휴대폰에서 아직 보내지 않고 적어 둔 새 조사(local)를 합친다.
+ * 시트의 값은 그대로 잠그고(저장됨), 이 휴대폰에서 적은 답 중 시트에 없는 것만 '입력한 값'으로 옮긴 보완 기록을 돌려준다.
+ * (새 조사로 따로 보내면 같은 화장실이 두 번 저장된다)
+ */
+export function supplementFromLocal(cfg, local, rows, { now = Date.now() } = {}) {
+  const d = supplementFromRows(cfg, newDraft({ surveyor: local.surveyor }), rows);
+  for (const k of ['assignId', 'assignTeam', 'assignDate']) if (local[k] !== undefined) d[k] = local[k];
+  d.freshAt = now; // 방금 시트에서 읽었으므로 바로 다시 불러오지 않음
+  d.joinedFrom = local.localId;
+  d.pageId = local.pageId || null; // 보던 화면에서 이어서 (없는 화면이면 enterSurvey가 처음으로)
+  const { carried, dropped, conflicts } = carryTyped(cfg, d, local, { skipUntouchedPrefill: true });
+  return Object.assign(d, { joinCarried: carried, joinDropped: dropped, joinConflicts: conflicts });
+}
+
+/**
+ * 이 휴대폰의 입력 중인 새 조사(draft)가 가리키는 배정(a)을 같은 조 다른 휴대폰이 이미 시트에 보냈으면 그 화장실번호, 아니면 ''.
+ * 다시 조사(resurveyOf)·보완 기록, '나눠서 조사' 응답을 못 받아 서버에 이미 이 조사가 저장됐을 수 있는 기록(splitTried),
+ * 그리고 합치지 않고 따로 이어 가기로 이미 고른 기록(joinDeclined)은 해당 없음.
+ */
+export function joinTarget(a, draft) {
+  if (!a || !draft || draft.mode === 'supplement' || draft.status !== 'editing' || draft.serverId || draft.resurveyOf || draft.splitTried || draft.joinDeclined) return '';
+  const done = [...(a.done || [])].sort((x, y) => (y.round || 0) - (x.round || 0))[0];
+  return done?.tid || '';
 }
 
 /**
