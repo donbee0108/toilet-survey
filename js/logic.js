@@ -1468,6 +1468,49 @@ export function joinTarget(a, draft) {
   return done?.tid || '';
 }
 
+/** 같은 조가 이미 보낸 화장실인데 이 휴대폰의 새 조사에는 아무것도 적지 않음(목록에서 온 이름·주소뿐, 사진 없음) → 지워도 되는 기록 */
+export function untouchedDuplicate(a, draft, photoCount = 0) {
+  return !!joinTarget(a, draft) && typedValueCount(draft) === 0 && !photoCount;
+}
+
+export const FINAL_CLEAN_MS = 60 * 60 * 1000;
+
+/**
+ * 휴대폰 기록 정리: 지울 기록 목록과 새 '빈칸 0 처음 본 시각' 표를 돌려준다 (아무것도 지우지 않음).
+ * 1) 같은 조가 이미 보낸 화장실의 아무것도 적지 않은 새 조사 → 바로
+ * 2) 시트에서 빈칸이 0개가 된 화장실(최종 제출)의 나머지 기록(입력 중·보완 중·합치기 전 기록)
+ *    → 이 휴대폰이 빈칸 0을 처음 본 뒤 1시간, 그리고 그 기록을 마지막으로 고친 뒤 1시간이 지나면.
+ *    보내는 중·전송 실패 기록과 다시 조사(다음 차수)는 지우지 않는다.
+ * seen: { '화장실번호|차수': 처음 본 시각(ms) }, photoCount(localId) → 사진 수
+ */
+export function cleanupTargets(allDrafts, { assignments = [], toiletInfo = [], seen = {}, now = Date.now(), photoCount = () => 0 } = {}) {
+  const nextSeen = {};
+  const final = new Map(); // 화장실번호 → 빈칸 0인 차수
+  for (const t of toiletInfo) {
+    if (!t?.id || t.missing !== 0) continue;
+    const key = `${t.id}|${t.round}`;
+    nextSeen[key] = seen[key] ?? now;
+    if (now - nextSeen[key] >= FINAL_CLEAN_MS) final.set(t.id, Number(t.round));
+  }
+  const byAssign = new Map(assignments.map((a) => [a.id, a]));
+  const out = [];
+  for (const d of allDrafts) {
+    const a = d.assignId ? byAssign.get(d.assignId) : null;
+    if (a && untouchedDuplicate(a, d, photoCount(d.localId))) { out.push({ draft: d, why: 'untouched' }); continue; }
+    if (d.resurveyOf) continue;
+    let tid = '';
+    if (d.status === 'joined') tid = d.joinedInto || '';
+    else if (d.status === 'editing') tid = d.serverId || (a ? joinTarget(a, { ...d, joinDeclined: false, splitTried: false }) : '');
+    if (!tid || !final.has(tid)) continue;
+    if (d.mode === 'supplement' && Number(d.round) !== final.get(tid)) continue; // 다른 차수의 보완은 그대로
+    // 지금 고치는 중이거나 방금 합친 기록이면 1시간 기다림
+    const last = d.status === 'joined' ? Math.max(d.joinedAt || 0, d.updatedAt || 0) : (d.updatedAt || 0);
+    if (now - last < FINAL_CLEAN_MS) continue;
+    out.push({ draft: d, why: 'final', tid });
+  }
+  return { targets: out, seen: nextSeen };
+}
+
 /**
  * 나눠서 조사를 누른 뒤 응답을 못 받았는데(서버에는 저장됨) 나중에 '제출하기'로 다시 보낸 경우:
  * 서버는 같은 clientId라 처음 것만 돌려준다. 그 뒤에 입력한 값은 보완(빈칸 채우기)으로 보낸다. 보낼 것이 없으면 null

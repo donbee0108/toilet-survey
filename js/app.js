@@ -219,6 +219,7 @@ async function loadAssignments() {
     await kv.set('assignments', { items: state.assignments, fetchedAt: Date.now(), startedAt });
   } catch { /* 예전 서버(배정 기능 없음)거나 끊김 — 저장된 목록을 씀 */ }
   await loadToiletInfo();
+  await cleanLocalRecords().catch(() => {});
   state.assignmentsReady = true;
   if (state.view === 'home') renderHome();
 }
@@ -231,6 +232,7 @@ async function loadToiletInfo() {
   try {
     const items = (await call('listToilets')).toilets || [];
     state.toiletInfo = items;
+    state.toiletInfoAt = Date.now();
     await kv.set('toilets', { items, fetchedAt: Date.now() });
   } catch { /* 저장된 사본을 씀 */ }
 }
@@ -251,7 +253,33 @@ async function refreshToilets() {
   homeFetchAt = Date.now();
   await loadToiletInfo();
   L.mergeToiletInfo(state.assignments || [], state.toiletInfo || []);
+  await cleanLocalRecords().catch(() => {});
   if (state.view === 'home') renderHome();
+}
+
+/**
+ * 같은 화장실의 쓰지 않는 휴대폰 기록을 지운다 (logic.js cleanupTargets):
+ * 아무것도 적지 않은 중복 조사는 바로, 시트에서 빈칸이 0개가 된 화장실의 나머지 기록은 1시간 뒤.
+ * 지금 열려 있는 조사는 건드리지 않는다.
+ */
+async function cleanLocalRecords() {
+  const all = await drafts.all();
+  const allPhotos = await photos.all();
+  const photoCount = (id) => allPhotos.filter((p) => p.localId === id).length;
+  // 빈칸 0(최종 제출) 판단은 방금 서버에서 받은 목록으로만 (저장된 옛 사본으로 지우지 않음)
+  const fresh = Date.now() - (state.toiletInfoAt || 0) < 5 * 60 * 1000;
+  const { targets, seen } = L.cleanupTargets(all, {
+    assignments: state.assignments || [], toiletInfo: fresh ? (state.toiletInfo || []) : [],
+    seen: (await kv.get('finalSeen')) || {}, now: Date.now(), photoCount,
+  });
+  if (fresh) await kv.set('finalSeen', seen);
+  for (const { draft } of targets) {
+    if (draft.localId === state.draft?.localId) continue;
+    const cur = await drafts.get(draft.localId);
+    if (!cur || cur.status !== draft.status || (cur.rev || 0) !== (draft.rev || 0)) continue; // 그사이 다른 창에서 바뀜
+    await drafts.remove(draft.localId); // 기록 먼저 (다른 창이 그 기록을 다시 저장하지 않게)
+    for (const p of await photos.byDraft(draft.localId)) await photos.remove(p.photoId);
+  }
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && state.view === 'home') refreshHomeSoon(); });
 
@@ -511,6 +539,12 @@ const openAssignment = navTask(async (id) => {
   if (st.kind === 'editing') {
     // 같은 조 다른 휴대폰이 이미 시트에 보낸 화장실이면, 이 휴대폰의 새 조사를 따로 이어 가지 않고 합칠지 묻는다 (같은 화장실이 두 번 저장되는 것을 막음)
     const tid = L.joinTarget(a, st.draft);
+    // 이 휴대폰에서는 아무것도 적지 않았으면 묻지 않고 그 기록을 지운 뒤 빈칸 채우기로
+    if (tid && navigator.onLine && apiUrl() && L.untouchedDuplicate(a, st.draft, (await photos.byDraft(st.draft.localId)).length)) {
+      await drafts.remove(st.draft.localId);
+      toast('같은 조에서 이미 보낸 화장실입니다. 빈칸 채우기로 엽니다.');
+      return startSupplementFromServer(tid);
+    }
     if (tid && !(navigator.onLine && apiUrl())) toast('같은 조가 이미 보낸 화장실입니다. 인터넷이 연결되면 합칠 수 있습니다.');
     else if (tid) {
       const choice = await offerJoin(a, st.draft, tid);
@@ -599,7 +633,7 @@ async function offerJoin(a, d, tid) {
   if (lostPhotos) notes.push(`그 칸에서 찍은 사진 <b>${lostPhotos}장</b>`);
   if (prev.conflicts.length) notes.push(`시트에 이미 다른 값이 있는 칸 <b>${prev.conflicts.length}개</b> (시트 값이 남음)`);
   const warn = notes.length
-    ? `<p class="warn">합쳐도 시트로 옮기지 못하는 것: ${notes.join(', ')}. 이 휴대폰에 14일 동안 따로 보관되지만 시트에는 올라가지 않으니, 필요하면 다른 분과 확인해 주세요.</p>`
+    ? `<p class="warn">합쳐도 시트로 옮기지 못하는 것: ${notes.join(', ')}. 이 휴대폰에 따로 보관되지만(시트의 빈칸이 모두 채워지고 1시간 뒤, 길어도 14일 뒤 지워짐) 시트에는 올라가지 않으니, 필요하면 다른 분과 확인해 주세요.</p>`
     : '<p>적어 둔 답과 사진은 모두 옮길 수 있습니다.</p>';
   return modal('같은 조에서 이미 보낸 화장실입니다', `${head}<p>${mine}시트의 조사에 <b>합쳐서 이어서 입력</b>하는 것을 권합니다. 시트에 이미 있는 칸은 그대로 남습니다.</p>${warn}`,
     [{ label: '합쳐서 이어서 입력', value: 'join', primary: true }, { label: '따로 계속 입력 (새 기록으로 저장)', value: 'own' }, { label: '취소', value: '' }]);
@@ -609,7 +643,7 @@ let joinBusy = false;
 /**
  * 이 휴대폰의 아직 보내지 않은 새 조사를, 같은 조가 이미 시트에 보낸 같은 화장실(tid)의 보완으로 합친다.
  * 시트에 있는 칸은 저장됨으로 잠그고, 이 휴대폰에서 적은 것 중 시트에 없는 칸·사진만 옮겨 이어서 입력한다.
- * 합친 뒤 이 휴대폰의 새 조사 기록은 지우지 않고 '합친 기록'(status 'joined')으로 14일 보관한다 — 전송·정리·첫 화면 카드에서는 빠지고,
+ * 합친 뒤 이 휴대폰의 새 조사 기록은 지우지 않고 '합친 기록'(status 'joined')으로 보관한다(시트 빈칸 0 + 1시간 뒤 cleanLocalRecords, 길어도 14일) — 전송·정리·첫 화면 카드에서는 빠지고,
  * 옮기지 못한 답·사진은 거기에 남는다. 시트를 읽지 못하면 아무것도 바꾸지 않는다.
  */
 const joinLocal = navTask(async (localId, tid) => {
@@ -656,7 +690,7 @@ const joinLocal = navTask(async (localId, tid) => {
       await modal('합치면서 옮기지 못한 것', `${res.joinConflicts.length ? `<p>같은 칸이 시트에 이미 다른 값으로 있어 시트 값이 남습니다 (${res.joinConflicts.length}칸).</p><ul>${res.joinConflicts.map((c) => `<li>${name(c)}: 내 답 <b>${esc(c.mine)}</b> / 시트 <b>${esc(c.theirs)}</b></li>`).join('')}</ul>` : ''}
         ${res.joinDropped ? `<p>시트에 없는 칸(장애인 화장실 칸 수가 다름)의 답 ${res.joinDropped}개는 시트로 옮기지 못했습니다.</p>` : ''}
         ${keptPhotos ? `<p>그 칸에서 찍은 사진 ${keptPhotos}장은 올리지 않았습니다.</p>` : ''}
-        <p>옮기지 못한 것은 이 휴대폰에 14일 동안 따로 보관됩니다 (처음 화면 아래 설정·정보).</p>`,
+        <p>옮기지 못한 것은 이 휴대폰에 따로 보관됩니다 (처음 화면 아래 설정·정보). 시트의 빈칸이 모두 채워지고 1시간 뒤(길어도 14일 뒤) 저절로 지워집니다.</p>`,
       [{ label: '확인', value: true, primary: true }]);
     }
   } finally {
@@ -759,7 +793,7 @@ async function renderHome() {
       <button class="btn" id="reload">조사 항목 새로 불러오기</button>
       <button class="btn" id="resetpw">비밀번호 다시 입력</button>
       <button class="btn" id="clean">완료된 기록 정리</button>
-      ${joinedOld.length ? `<p class="hint">합치기 전에 이 휴대폰에서 적은 기록 ${joinedOld.length}건을 14일 동안 보관 중입니다 (시트로 옮기지 못한 답·사진이 있을 때 확인용).</p><button class="btn" id="dropJoined">합치기 전 기록 지우기</button>` : ''}
+      ${joinedOld.length ? `<p class="hint">합치기 전에 이 휴대폰에서 적은 기록 ${joinedOld.length}건을 보관 중입니다 (빈칸이 모두 채워지고 1시간 뒤, 길어도 14일 뒤 저절로 지워짐) (시트로 옮기지 못한 답·사진이 있을 때 확인용).</p><button class="btn" id="dropJoined">합치기 전 기록 지우기</button>` : ''}
       <p class="hint">다 보낸 조사(사진 포함)는 저절로 이 휴대폰에서 지워집니다. 시트에는 그대로 남습니다. "완료된 기록 정리"는 남은 '보냄' 표시까지 바로 지울 때만 누르면 됩니다.</p>
     </details>
   </main>`;
