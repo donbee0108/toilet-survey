@@ -278,21 +278,31 @@ export function buildPages(cfg, draft) {
   const pages = [{ id: 'start', type: 'start', title: '조사 시작' }];
   let run = [];
   const flushRun = () => { pages.push(...sectionPages(run, TOILET, '')); run = []; };
+  // 공간 화면은 한 번에, 쪽별로 모아서: 남자·여자 화장실 있음 → 공용 장애인 → 남자 쪽 장애인 → 남자화장실 → 여자 쪽 장애인 → 여자화장실
+  // (화면 순서만 바뀜. 공간 번호 M1·M2…는 multiSpaces 순서 그대로)
+  let spacesDone = false;
   for (const u of units) {
     if (u.item) { run.push(u.item); continue; }
     flushRun();
+    if (spacesDone) continue;
+    spacesDone = true;
     // 보완은 시트에 줄(공간번호)이 있는 칸만 보여 준다
     const hasRow = (key) => draft.mode !== 'supplement' || !!draft.spaceIds?.[key];
-    if (u.block === 'MULTI') {
-      for (const sp of multiSpaces(draft).filter((x) => hasRow(x.key))) pages.push(...sectionPages(multiItems, sp.key, sp.label));
-    } else {
-      pages.push({ id: 'presence', type: 'presence', title: '남자·여자 화장실', ctx: TOILET });
-      if (draft.hasMale !== false && hasRow(MA)) {
-        pages.push(...sectionPages(mfItems.filter((it) => appliesTo(it, 'MALE')), MA, '남자화장실'));
-      }
-      if (draft.hasFemale !== false && hasRow(FE)) {
-        pages.push(...sectionPages(mfItems.filter((it) => appliesTo(it, 'FEMALE')), FE, '여자화장실'));
-      }
+    const multi = multiSpaces(draft).filter((x) => hasRow(x.key));
+    const multiOf = (side) => {
+      if (!multiItems.length) return;
+      for (const sp of multi.filter((x) => x.side === side)) pages.push(...sectionPages(multiItems, sp.key, sp.label));
+    };
+    // 남녀 있음·없음은 처음 조사에서만 고름 (보완에서는 바꿀 수 없어 화면을 건너뜀 — 나눠서 조사 뒤 바로 첫 공간으로)
+    if (mfItems.length && draft.mode !== 'supplement') pages.push({ id: 'presence', type: 'presence', title: '남자·여자 화장실', ctx: TOILET });
+    multiOf('SHARED');
+    multiOf('MALE');
+    if (mfItems.length && draft.hasMale !== false && hasRow(MA)) {
+      pages.push(...sectionPages(mfItems.filter((it) => appliesTo(it, 'MALE')), MA, '남자화장실'));
+    }
+    multiOf('FEMALE');
+    if (mfItems.length && draft.hasFemale !== false && hasRow(FE)) {
+      pages.push(...sectionPages(mfItems.filter((it) => appliesTo(it, 'FEMALE')), FE, '여자화장실'));
     }
   }
   flushRun();
