@@ -17,7 +17,8 @@ const emit = () => listeners.forEach((fn) => { try { fn(); } catch { /* 무시 *
 
 export const SENDABLE = ['queued', 'sending', 'photos', 'failed'];
 
-async function sendDraft(d) {
+/** 조사 값(제출·보완·나머지 값)만 보낸다. 사진은 sendPhotos가 따로 올린다 */
+async function sendValues(d) {
   if (d.mode === 'supplement') {
     // 보완: 화장실번호·공간번호를 이미 알고 있으므로 빈칸 채우기만 보내고 사진으로 넘어간다
     if (!d.supplementDone) {
@@ -58,6 +59,10 @@ async function sendDraft(d) {
     d.restPending = false;
     await drafts.put(d); emit();
   }
+}
+
+async function sendPhotos(d) {
+  if (!d.serverId) return;
   const list = (await photos.byDraft(d.localId)).filter((p) => p.status !== 'done' && p.status !== 'lost');
   let failed = 0;
   for (const p of list) {
@@ -119,24 +124,72 @@ export async function cleanSent() {
   return n;
 }
 
+/** 아직 서버에 값을 보내지 않은 조사 (retryFailed: 전에 실패한 것도 다시) */
+const needsValues = (d, retryFailed) => SENDABLE.includes(d.status) && (retryFailed || d.status !== 'failed')
+  && (d.mode === 'supplement' ? !d.supplementDone : (!d.serverId || d.restPending));
+
+/** 보내다 실패: 서버가 바쁘면 잠시 뒤 다시, 아니면 '실패'로. 이번 차례를 이어 가도 되면 true */
+async function onSendError(d, e) {
+  if (BUSY_RE.test(e.message)) {
+    // 사진 단계였으면 사진부터 이어서, 아니면 처음부터 (서버가 같은 조사를 두 번 저장하지 않음)
+    d.status = d.serverId ? 'photos' : 'queued'; d.error = '';
+    await drafts.put(d); emit();
+    clearTimeout(busyTimer);
+    busyTimer = setTimeout(() => processQueue(), 5000 + Math.random() * 15000); // 여럿이 한꺼번에 다시 몰리지 않게 흩어서
+    return false;
+  }
+  d.status = 'failed'; d.error = e.message;
+  await drafts.put(d); emit();
+  return !/비밀번호/.test(e.message);
+}
+
+/**
+ * 값 보내기 줄: 사진과 따로 돈다. 사진은 휴대폰 데이터로 몇 분씩 걸려, 그 뒤에 줄 선 보완 값이 늦게 들어가면
+ * 나눠서 조사하는 분이 불러올 수 없다. 보내는 중에 또 부르면 끝난 뒤 한 번 더 돈다. 멈췄으면(바쁨·비밀번호) false
+ */
+let valuesJob = null;
+let valuesAgain = false;
+let valuesRetryFailed = false; // 도는 중에 '실패한 것도 다시'를 부탁받으면 다음 바퀴에서
+function sendAllValues(retryFailed = false) {
+  valuesRetryFailed ||= retryFailed;
+  if (valuesJob) { valuesAgain = true; return valuesJob; }
+  valuesJob = (async () => {
+    try {
+      do {
+        valuesAgain = false;
+        const retry = valuesRetryFailed;
+        valuesRetryFailed = false;
+        const list = (await drafts.all()).filter((d) => needsValues(d, retry)).sort((a, b) => a.queuedAt - b.queuedAt);
+        for (const d of list) {
+          try { await sendValues(d); } catch (e) { if (!(await onSendError(d, e))) return false; }
+        }
+      } while ((valuesAgain || valuesRetryFailed) && navigator.onLine);
+      return true;
+    } finally {
+      valuesJob = null;
+    }
+  })();
+  return valuesJob;
+}
+
 export async function processQueue() {
-  if (running || !navigator.onLine) return;
+  if (!navigator.onLine) return;
+  // 사진을 올리는 중이어도 새로 제출한 값은 바로. 사진 줄이 그새 끝났으면 그 조사의 사진도 이어서
+  if (running) { sendAllValues().then((ok) => { if (ok && !running) processQueue(); }).catch(() => {}); return; }
   running = true;
   try {
-    const list = (await drafts.all()).filter((d) => SENDABLE.includes(d.status)).sort((a, b) => a.queuedAt - b.queuedAt);
-    for (const d of list) {
-      try { await sendDraft(d); } catch (e) {
-        if (BUSY_RE.test(e.message)) {
-          // 사진 단계였으면 사진부터 이어서, 아니면 처음부터 (서버가 같은 조사를 두 번 저장하지 않음)
-          d.status = d.serverId ? 'photos' : 'queued'; d.error = '';
-          await drafts.put(d); emit();
-          clearTimeout(busyTimer);
-          busyTimer = setTimeout(() => processQueue(), 5000 + Math.random() * 15000); // 여럿이 한꺼번에 다시 몰리지 않게 흩어서
-          break;
+    if (await sendAllValues(true)) {
+      // 값을 다 보낸 조사의 사진 (값을 못 보낸 조사는 다음 차례에). 그사이 값을 보낸 조사도 이어서
+      const tried = new Set();
+      photoLoop: for (;;) {
+        const list = (await drafts.all())
+          .filter((d) => !tried.has(d.localId) && SENDABLE.includes(d.status) && d.serverId && !d.restPending && (d.mode !== 'supplement' || d.supplementDone))
+          .sort((a, b) => a.queuedAt - b.queuedAt);
+        if (!list.length) break;
+        for (const d of list) {
+          tried.add(d.localId);
+          try { await sendPhotos(d); } catch (e) { if (!(await onSendError(d, e))) break photoLoop; }
         }
-        d.status = 'failed'; d.error = e.message;
-        await drafts.put(d); emit();
-        if (/비밀번호/.test(e.message)) break;
       }
     }
   } finally {
