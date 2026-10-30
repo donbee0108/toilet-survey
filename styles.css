@@ -309,3 +309,12 @@ button.progress { border: 0; border-radius: var(--radius); background: none; fon
 .sv-na .sv-val { color: var(--sub); background: #efedea; border: 1.5px solid #d9d4cc; border-radius: 999px; padding: 0 10px; font-weight: 600; }
 .sv-missing .sv-val { color: #7c2d12; background: var(--blank); border: 1.5px solid var(--blank-line); border-radius: 999px; padding: 0 10px; font-weight: 800; }
 .sv-actions { margin-top: 20px; }
+
+/* 장애인 화장실 개수 요약 (제출·나눠서·개수 고치기 확인 창) */
+.count-sum { margin: 12px 0; padding: 12px 14px; border: 2px solid var(--primary); border-radius: 14px; background: var(--primary-soft); }
+.count-sum-title { font-size: 16px; font-weight: 700; }
+.count-sum-line { font-size: 22px; font-weight: 800; margin-top: 4px; }
+.count-sum-note { font-size: 16px; margin-top: 6px; }
+.count-change { padding-left: 4px; list-style: none; }
+.count-change li { margin: 8px 0; }
+.warn-text { color: var(--danger, #b42318); font-weight: 700; }

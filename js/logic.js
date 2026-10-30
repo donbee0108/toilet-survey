@@ -772,14 +772,27 @@ export function mergeFresh(cfg, draft, prev) {
     }
   };
   collect(TOILET, draft.toilet);
-  for (const [key, sp] of Object.entries(draft.spaces || {})) collect(key, sp.values);
+  // 그사이 '장애인 화장실 개수 고치기'로 시트에서 지워진 칸: 거기 적은 값은 넣을 곳이 없어 빼고 합친다 (알림용으로 셈)
+  let gone = 0;
+  const goneKeys = new Set();
+  const goneIds = {}; // 칸 이름 → 지워진 공간번호 (아직 안 올린 사진을 새 칸에 잘못 올리지 않게 app.js가 씀)
+  for (const [key, sp] of Object.entries(draft.spaces || {})) {
+    // (지운 뒤 같은 쪽에 다시 늘려 같은 이름의 칸이 생겨도 공간번호가 다르면 다른 칸)
+    if (key.startsWith('MULTI-') && draft.spaceIds?.[key] && fresh.spaceIds?.[key] !== draft.spaceIds[key]) {
+      goneKeys.add(key);
+      goneIds[key] = draft.spaceIds[key];
+      gone += Object.entries(sp.values || {}).filter(([c, v]) => !blank(v) && v !== 'NA' && !draft.locked?.[`${key}:${c}`]).length;
+      continue;
+    }
+    collect(key, sp.values);
+  }
 
   const before = new Set(Object.keys(draft.locked || {}));
   const conflicts = [];
   // 내가 '고치기'로 연 칸: 그사이 시트 값이 바뀌지 않았으면 내 값을 유지, 바뀌었으면 겹친 칸
   for (const key of Object.keys(draft.unlocked || {})) {
     const [ctx, code] = key.split(':');
-    if (!(key in fresh.orig)) continue;
+    if (!(key in fresh.orig) || goneKeys.has(ctx)) continue;
     if ((fresh.orig[key] ?? '') === (draft.orig[key] ?? '')) {
       fresh.unlocked[key] = true;
       if (draft.reopened?.[key]) fresh.reopened[key] = true;
@@ -811,12 +824,16 @@ export function mergeFresh(cfg, draft, prev) {
     return { ok: false, guarded: true, lost, reason: `불러온 값이 이 휴대폰에서 적은 ${lost.length}칸을 지울 수 있어 합치지 않았습니다.` };
   }
   const added = Object.keys(fresh.locked).filter((k) => !before.has(k)).length;
+  // 지워진 칸에 남은 '직접 고친' 표시는 버린다 (같은 이름의 새 칸으로 이어지지 않게)
+  for (const mark of ['touched', 'reopened']) {
+    for (const k of Object.keys(draft[mark] || {})) if (goneKeys.has(k.split(':')[0])) delete draft[mark][k];
+  }
   Object.assign(draft, {
     toilet: fresh.toilet, spaces: fresh.spaces, locked: fresh.locked, orig: fresh.orig,
     replaceable: fresh.replaceable, unlocked: fresh.unlocked, reopened: fresh.reopened, hasMale: fresh.hasMale, hasFemale: fresh.hasFemale, spaceIds: fresh.spaceIds,
     freshAt: Date.now(),
   });
-  return { ok: true, added, conflicts };
+  return { ok: true, added, conflicts, gone, goneIds };
 }
 
 /** 보완 제출용: 시트 값과 달라진(새로 채운) 칸만 보낸다 (docs/API.md supplement) */
@@ -1246,6 +1263,55 @@ export function splitCountDefaults(draft) {
     out[code] = /^\d+$/.test(s) ? s : '';
   }
   return out;
+}
+
+const COUNT_LABEL = { C1a: '남자 쪽', C1b: '여자 쪽', C1c: '공용' };
+/** 제출·나눠서 확인 창에 크게 보여 줄 개수 요약: '남자 쪽 1곳 · 여자 쪽 0곳 · 공용 0곳' (적지 않은 개수는 '?곳') */
+export function countSummary(counts) {
+  return Object.keys(MULTI_COUNT_CODES).map((code) => {
+    const s = String(counts?.[code] ?? '').trim();
+    return `${COUNT_LABEL[code]} ${/^\d+$/.test(s) ? Number(s) : '?'}곳`;
+  }).join(' · ');
+}
+
+/** 제출한 뒤 '장애인 화장실 개수 고치기'를 할 수 있는 조사: 보완 중인 것만 (칸 구성을 시트에서 받아 옴) */
+export function canChangeCounts(draft) {
+  return !!draft && draft.mode === 'supplement' && draft.status === 'editing' && !!draft.serverId;
+}
+
+// 시트에 줄(공간번호)이 있는 그 쪽 장애인 칸, 순서대로 (서버도 줄 수로 개수를 판단 — 개수 칸 값과 어긋나도 줄 기준)
+const sheetMulti = (draft, side) => Object.keys(draft.spaceIds || {})
+  .map((key) => /^MULTI-(\w+)-(\d+)$/.exec(key))
+  .filter((m) => m && m[1] === side)
+  .map((m) => ({ key: m[0], side, sideSeq: Number(m[2]), label: `${SIDE_LABEL[side]} 장애인 화장실 ${m[2]}` }))
+  .sort((a, b) => a.sideSeq - b.sideSeq);
+
+/** 지금 칸 수 (시트에 줄이 있는 칸 기준) — 개수 고치기의 from */
+export function currentCounts(draft) {
+  const out = {};
+  for (const [code, side] of Object.entries(MULTI_COUNT_CODES)) out[code] = sheetMulti(draft, side).length;
+  return out;
+}
+
+/**
+ * 개수 고치기 미리 보기: 새로 생길 칸 이름, 지워질 칸(그 쪽 마지막 칸부터)과 그 칸의 저장된 답·이 휴대폰에서 적은 답 수.
+ * to: { C1a: '2', … } (정수 글자). photoCount(key) → 그 칸 사진 수(이 휴대폰에서 아직 안 올린 것 + 보낸 것)
+ */
+export function countChangePreview(draft, to, photoCount = () => 0) {
+  const added = [];
+  const removed = [];
+  for (const [code, side] of Object.entries(MULTI_COUNT_CODES)) {
+    const list = sheetMulti(draft, side);
+    const n = Number(to[code]);
+    for (let s = list.length + 1; s <= n; s++) added.push(`${SIDE_LABEL[side]} 장애인 화장실 ${s}`);
+    for (const sp of list.slice(n)) {
+      const saved = Object.entries(draft.orig || {}).filter(([k, v]) => k.startsWith(`${sp.key}:`) && v !== '' && v !== 'NA').length;
+      const mine = Object.entries(draft.spaces[sp.key]?.values || {})
+        .filter(([c, v]) => !blank(v) && v !== 'NA' && !draft.locked?.[`${sp.key}:${c}`]).length;
+      removed.push({ key: sp.key, label: sp.label, saved, mine, photos: photoCount(sp.key) });
+    }
+  }
+  return { added, removed };
 }
 
 /** 나누기 전에 꼭 적어야 하는 장애인 화장실 개수 중 빈 것 (칸 구성은 보낸 뒤 바꿀 수 없으므로) */

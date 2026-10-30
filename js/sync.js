@@ -25,7 +25,7 @@ async function sendValues(d) {
       d.status = 'sending'; d.error = '';
       await drafts.put(d); emit();
       const res = await call('supplement', d.submission);
-      d.result = { filled: res.filled, edited: res.edited || 0, conflicts: res.conflicts || [], skipped: res.skipped || [] };
+      d.result = { filled: res.filled, edited: res.edited || 0, conflicts: res.conflicts || [], skipped: res.skipped || [], goneSkipped: res.goneSkipped || 0 };
       // 예전 서버(Code.gs 갱신 전)는 고친 칸을 모른 채 무시한다 → 반영 안 됐다고 알려 준다
       const sentEdits = Object.keys(d.submission.edits || {}).length + (d.submission.spaces || []).reduce((n, s) => n + Object.keys(s.edits || {}).length, 0);
       if (sentEdits && res.edited === undefined) d.result.editsIgnored = sentEdits;
@@ -70,7 +70,8 @@ async function sendPhotos(d) {
       const blob = await photos.blob(p.photoId);
       if (!blob) { Object.assign(p, { status: 'lost', error: '휴대폰에서 사진 파일을 찾지 못했습니다.' }); await photos.put(p); continue; }
       const res = await call('uploadPhoto', {
-        clientId: p.photoId, toiletId: d.serverId, spaceId: p.spaceKey ? (d.spaceIds[p.spaceKey] || '') : '',
+        // goneSpaceId: 개수 고치기로 지워진 칸의 사진 — 그 공간번호로 보내면 서버가 '지워진 칸' 사진으로 남김 (같은 이름의 새 칸에 섞이지 않게)
+        clientId: p.photoId, toiletId: d.serverId, spaceId: p.goneSpaceId || (p.spaceKey ? (d.spaceIds[p.spaceKey] || '') : ''),
         itemCode: p.itemCode, takenAt: p.takenAt, surveyor: d.surveyor, description: p.description,
         mimeType: 'image/jpeg', data: await blobToBase64(blob),
       });
