@@ -318,3 +318,7 @@ button.progress { border: 0; border-radius: var(--radius); background: none; fon
 .count-change { padding-left: 4px; list-style: none; }
 .count-change li { margin: 8px 0; }
 .warn-text { color: var(--danger, #b42318); font-weight: 700; }
+
+/* 오늘 목록 카드: 입력 중인 기록 삭제 (지도 버튼과 겹치지 않게 왼쪽) */
+.card-actions { padding: 0 14px 14px; }
+.card-actions .btn { min-height: 44px; }

@@ -411,9 +411,12 @@ function assignCardHtml(a, allDrafts) {
       todo = '<div class="todo">▶ 눌러서 빈칸 채우기</div>';
     }
   }
+  // 아직 보내지 않은 입력 중·보완 중 기록은 지울 수 있게 (예: 실수로 '처음부터 다시 조사'를 누름)
+  const delId = sum?.kind === 'failed' || sum?.kind === 'sending' ? '' : st.kind === 'editing' ? st.draft.localId : sum?.kind === 'supp' ? sum.supp.localId : '';
   return withMapLink(`<button class="assign-main" data-assign="${esc(a.id)}">
     <div class="row">${L.orderLabel(a) ? `<b class="grow ord-name"><span class="ord-no">${esc(L.orderLabel(a))}</span><span class="ord-text">${esc(a.name)}</span></b>` : `<b class="grow">${esc(a.name)}</b>`}${chip}</div>
-    ${addressLinesHtml(a)}${a.memo ? `<div class="sub">${esc(a.memo)}</div>` : ''}${todo}</button>`, a);
+    ${addressLinesHtml(a)}${a.memo ? `<div class="sub">${esc(a.memo)}</div>` : ''}${todo}</button>`, a,
+  delId ? `<div class="card-actions"><button class="btn danger small" data-del="${esc(delId)}">입력 중인 기록 삭제</button></div>` : '');
 }
 
 /** 배정 카드 주소: 도로명 한 줄, 지번이 따로 있으면 한 줄 더. 둘 다 없으면 아무것도 안 보임 */
@@ -427,9 +430,9 @@ function addressLinesHtml(a) {
  * 누르는 카드(button) + 그 아래 '네이버 지도' 링크. 링크를 버튼 안에 넣으면 안 되므로(눌렀을 때 조사가 열림)
  * 바깥 div.card 안에 나란히 둔다.
  */
-function withMapLink(buttonHtml, a) {
+function withMapLink(buttonHtml, a, extraHtml = '') {
   const url = L.naverMapUrl(a);
-  return `<div class="card assign assign-card${url ? ' has-map' : ''}">${buttonHtml}${url ? `
+  return `<div class="card assign assign-card${url ? ' has-map' : ''}">${buttonHtml}${extraHtml}${url ? `
     <div class="map-row"><a class="map-link" href="${esc(url)}" target="_blank" rel="noopener" title="네이버 지도" aria-label="${esc(a.name || '')} 네이버 지도에서 보기">📍</a></div>` : ''}</div>`;
 }
 
@@ -830,7 +833,9 @@ async function renderHome() {
   $app.querySelectorAll('[data-del]').forEach((b) => {
     b.onclick = async () => {
       const d = await drafts.get(b.dataset.del);
-      if (!await confirmBox('조사 삭제', `<p><b>${esc(d.toilet.B0a || '(이름 없음)')}</b> 조사를 지울까요? 입력한 내용과 사진이 모두 사라집니다.</p>`, '지우기', '취소')) return;
+      if (!d) { renderHome(); return; }
+      const sent = d.resurveyOf || d.mode === 'supplement' ? '<p>시트에 이미 보낸 조사는 그대로 남습니다.</p>' : '';
+      if (!await confirmBox('조사 삭제', `<p><b>${esc(d.toilet.B0a || '(이름 없음)')}</b> 조사를 지울까요? 이 휴대폰에서 입력한 내용과 사진이 모두 사라집니다.</p>${sent}`, '지우기', '취소')) return;
       for (const p of await photos.byDraft(d.localId)) await photos.remove(p.photoId);
       await drafts.remove(d.localId);
       renderHome();
