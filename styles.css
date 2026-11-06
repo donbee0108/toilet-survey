@@ -322,3 +322,6 @@ button.progress { border: 0; border-radius: var(--radius); background: none; fon
 /* 오늘 목록 카드: 입력 중인 기록 삭제 (지도 버튼과 겹치지 않게 왼쪽) */
 .card-actions { padding: 0 14px 14px; }
 .card-actions .btn { min-height: 44px; }
+
+/* 앨범에서 고르기: 사진 찍기 버튼과 같은 크기로 나란히 */
+.photo-row .btn.camera.album:not(.small) { min-height: 56px; padding: 10px 22px; }

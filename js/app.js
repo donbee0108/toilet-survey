@@ -28,6 +28,8 @@ function nowText(t = new Date()) {
   return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())} ${pad(t.getHours())}:${pad(t.getMinutes())}`;
 }
 const dateText = (ms) => (ms ? nowText(new Date(ms)) : '');
+/** 앨범 사진의 찍은 때: '11/5 14:20' */
+const shotTime = (ms) => { const t = new Date(ms); return `${t.getMonth() + 1}/${t.getDate()} ${pad(t.getHours())}:${pad(t.getMinutes())}`; };
 
 let saveTimer = null;
 function saveSoon() {
@@ -1809,7 +1811,7 @@ function itemHtml(it, ctx, draftPhotos, sug) {
     ${input}
     <div class="feedback">${feedbackHtml(it, raw)}${L.multiWarning(state.cfg, it, raw) ? `<div class="warn">${esc(L.multiWarning(state.cfg, it, raw))}</div>` : ''}</div>
     ${sug ? `<div class="suggest ${suggested ? 'on' : ''}">${suggested ? '<b>자동 제안</b> — 맞는지 확인하고, 다르면 고쳐 주세요. ' : ''}${!suggested && sug.value != null && blank(raw) ? `<b>제안: ${esc(choiceLabel(it, sug.value))}</b> — 맞으면 직접 눌러 주세요. ` : ''}${esc(sug.reason)}</div>` : ''}
-    <div class="photo-row"><label class="btn ${isPhotoItem ? 'primary' : 'small'} camera">📷 ${isPhotoItem ? '사진 찍기' : '사진'}<input type="file" accept="image/*" capture="environment" data-photo hidden></label>${photoStrip(myPhotos)}</div>
+    <div class="photo-row"><label class="btn ${isPhotoItem ? 'primary' : 'small'} camera">📷 ${isPhotoItem ? '사진 찍기' : '사진'}<input type="file" accept="image/*" capture="environment" data-photo hidden></label><label class="btn ${isPhotoItem ? '' : 'small'} camera album">🖼️ ${isPhotoItem ? '앨범에서 고르기' : '앨범'}<input type="file" accept="image/*" multiple data-album hidden></label>${photoStrip(myPhotos)}</div>
   </div>`;
 }
 
@@ -1926,22 +1928,42 @@ function bindPage(page) {
       L.setRaw(d, ctx, code, L.getRaw(d, ctx, code) === 'NA' ? '' : 'NA');
       markTouched(ctx, code); saveSoon(); keepScroll(renderPage);
     });
-    el.querySelector('[data-photo]')?.addEventListener('change', async (e) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
+    // 사진 저장 (카메라 1장 · 앨범 여러 장). 촬영시각 칸은 붙인 시각 — 보고서가 이 시각으로 차수를 나누므로.
+    // 앨범 사진은 설명에 '앨범 사진 · 찍은 때'를 남겨 현장에서 바로 찍은 사진과 구분한다
+    // 저장하는 동안은 화면을 덮는다 (여러 장이면 몇 초 걸림 — 그사이 다른 조사로 가거나 같은 사진을 또 고르지 않게)
+    const addPhotos = async (input, album) => {
+      const files = [...(input.files || [])].slice(0, album ? undefined : 1);
+      input.value = ''; // 같은 사진을 다시 골라도 다시 받게
+      if (!files.length) return;
+      const info = L.spaceInfo(d, ctx);
+      const closeBusy = busyOverlay(files.length > 1 ? `사진 ${files.length}장 저장 중… 잠시만 기다려 주세요` : '사진 저장 중…');
+      let saved = 0;
+      let failed = 0;
       try {
-        const blob = await resizePhoto(file);
-        const info = L.spaceInfo(d, ctx);
-        await photos.put({
-          photoId: `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, localId: d.localId,
-          spaceKey: ctx === L.TOILET ? '' : ctx, itemCode: code, takenAt: nowText(), status: 'pending',
-          description: `${info?.label ? `${info.label} · ` : ''}${it.question}`,
-        }, blob);
-        toast('사진을 저장했습니다.');
-        await syncPhotoCount(ctx, code);
-        keepScroll(renderPage);
-      } catch (err) { toast(err.message); }
-    });
+        for (const file of files) {
+          try {
+            const blob = await resizePhoto(file);
+            // 앨범 사진의 파일 시각: 방금 만든 사본(휴대폰이 고를 때 새로 만든 파일)이면 찍은 때가 아니므로 적지 않음
+            const old = file.lastModified && Date.now() - file.lastModified > 2 * 60 * 1000;
+            const when = album ? (old ? ` (앨범 사진 · 찍은 때 ${shotTime(file.lastModified)})` : ' (앨범 사진)') : '';
+            await photos.put({
+              photoId: `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, localId: d.localId,
+              spaceKey: ctx === L.TOILET ? '' : ctx, itemCode: code, takenAt: nowText(), status: 'pending',
+              description: `${info?.label ? `${info.label} · ` : ''}${it.question}${when}`,
+            }, blob);
+            saved++;
+          } catch { failed++; }
+        }
+        if (saved) await syncPhotoCount(ctx, code);
+      } finally {
+        closeBusy();
+      }
+      if (failed) toast(`${files.length}장 중 ${failed}장은 읽지 못했습니다${saved ? ` (${saved}장 저장)` : ''}. 다른 사진으로 다시 골라 주세요.`);
+      else toast(saved > 1 ? `사진 ${saved}장을 저장했습니다.` : '사진을 저장했습니다.');
+      if (saved) keepScroll(renderPage);
+    };
+    el.querySelector('[data-photo]')?.addEventListener('change', (e) => addPhotos(e.target, false));
+    el.querySelector('[data-album]')?.addEventListener('change', (e) => addPhotos(e.target, true));
   });
   const imgs = $app.querySelectorAll('img[data-blob]');
   if (imgs.length) {
